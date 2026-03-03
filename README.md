@@ -31,7 +31,7 @@ dexbox stop
 ## Install the CLI
 
 ```bash
-go install github.com/getdexboxai/dexbox/cmd/dexbox@latest
+go install github.com/getnenai/dexbox/cmd/dexbox@latest
 ```
 
 ### Build and install locally:
