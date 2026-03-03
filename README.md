@@ -1,4 +1,6 @@
-# dexbox
+# Dexbox
+
+[![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?logo=discord&logoColor=white)](https://discord.gg/Bga4QkvEgZ)
 
 Run computer-use workflows locally using Docker. Workflows execute inside a sandboxed environment with access to a desktop environment.
 
