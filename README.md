@@ -19,7 +19,7 @@ cp .env.example .env # add your ANTHROPIC_API_KEY to .env
 
 dexbox start
 
-dexbox run examples/open-browser.py --params '{"url":"https://example.com"}'
+dexbox run examples/extract-data.py
 
 dexbox stop
 ```
@@ -182,11 +182,9 @@ dexbox run examples/open-browser.py
 
 See the [`examples/`](examples/) directory:
 
-- [`open-browser.py`](examples/open-browser.py) — Navigate to a URL
-- [`fill-form.py`](examples/fill-form.py) — Fill out a web form
 - [`extract-data.py`](examples/extract-data.py) — Extract structured data
+- [`fill-form.py`](examples/fill-form.py) — Fill out a web form
 - [`download-files.py`](examples/download-files.py) — Download files to Drive
-- [`login-secure.py`](examples/login-secure.py) — Log in with a secure password
 
 ## Testing
 
