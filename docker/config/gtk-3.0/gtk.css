@@ -1,0 +1,34 @@
+/* Force lxpanel to use dark theme colors */
+#lxpanel {
+    background-color: #1a1a1a;
+    color: #ecf0f1;
+}
+
+/* Task buttons (window list) */
+.lxpanel .tasklist button {
+    background-color: #2a2a2a;
+    color: #ecf0f1;
+    border: none;
+    padding: 4px 8px;
+    margin: 2px;
+}
+
+.lxpanel .tasklist button:hover {
+    background-color: #3a3a3a;
+}
+
+.lxpanel .tasklist button:active,
+.lxpanel .tasklist button:checked {
+    background-color: #4a4a4a;
+}
+
+/* Launcher buttons */
+.lxpanel .launchbar button {
+    background-color: transparent;
+    border: none;
+}
+
+.lxpanel .launchbar button:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+

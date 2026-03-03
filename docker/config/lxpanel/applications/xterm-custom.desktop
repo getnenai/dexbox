@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Terminal
+Comment=Terminal Emulator
+Exec=xterm
+Icon=/usr/share/icons/hicolor/48x48/apps/xterm-color.png
+Type=Application
+Terminal=false
+Categories=System;TerminalEmulator;
+

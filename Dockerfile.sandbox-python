@@ -1,0 +1,50 @@
+# dexbox — Sandbox container
+#
+# Minimal image: only httpx, pydantic, and the dexbox SDK.
+# The harness script is injected at runtime by the orchestrator.
+FROM cgr.dev/chainguard/python:latest-dev AS builder
+
+# Switch to root for installation (Chainguard runs as nonroot by default)
+USER root
+
+WORKDIR /build
+
+# Create virtual environment
+RUN python -m venv /venv
+
+# Install httpx (RPC) + pydantic (workflow validation)
+# Then remove pip and setuptools to harden the image
+RUN /venv/bin/pip install --no-cache-dir httpx==0.27.0 pydantic==2.12.5 && \
+    /venv/bin/pip uninstall -y pip setuptools && \
+    rm -rf /venv/bin/pip* /venv/bin/easy_install*
+
+# Change ownership to nonroot user (UID 65532) for runtime stage
+RUN chown -R 65532:65532 /venv
+
+# ---------------------------------------------------------------------------
+# Final image — distroless for minimal attack surface
+# ---------------------------------------------------------------------------
+FROM cgr.dev/chainguard/python:latest
+
+WORKDIR /app
+
+# Copy virtualenv with httpx from builder (owned by nonroot)
+COPY --from=builder --chown=65532:65532 /venv /venv
+
+# Copy the dexbox SDK (sandbox-facing modules only)
+COPY --chown=65532:65532 src/dexbox/__init__.py          dexbox/__init__.py
+COPY --chown=65532:65532 src/dexbox/agent.py             dexbox/agent.py
+COPY --chown=65532:65532 src/dexbox/computer.py          dexbox/computer.py
+COPY --chown=65532:65532 src/dexbox/exceptions.py        dexbox/exceptions.py
+COPY --chown=65532:65532 src/dexbox/models.py            dexbox/models.py
+COPY --chown=65532:65532 src/dexbox/rpc.py               dexbox/rpc.py
+COPY --chown=65532:65532 src/dexbox/secure_value.py      dexbox/secure_value.py
+
+ENV PYTHONPATH="/app:/venv/lib/python3/site-packages" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Run as non-root (already default in Chainguard, UID 65532)
+USER nonroot
+
+ENTRYPOINT ["/venv/bin/python"]
