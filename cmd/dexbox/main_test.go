@@ -139,6 +139,18 @@ func TestStreamRun_Result_Success(t *testing.T) {
 	}
 }
 
+func TestStreamRun_Result_SuccessWithAssetsURL(t *testing.T) {
+	ndjson := `{"type":"result","data":{"success":true,"duration_ms":123,"assets_url":"https://s3.amazonaws.com/assets.zip"}}` + "\n"
+	var out, errOut bytes.Buffer
+	code, err := streamRun(strings.NewReader(ndjson), "wf", &out, &errOut)
+	if err != nil || code != 0 {
+		t.Fatalf("expected success, got code=%d err=%v", code, err)
+	}
+	if !strings.Contains(out.String(), "Assets URL: https://s3.amazonaws.com/assets.zip") {
+		t.Errorf("expected assets URL in output, got: %q", out.String())
+	}
+}
+
 func TestStreamRun_Result_SuccessWithResult(t *testing.T) {
 	ndjson := `{"type":"result","data":{"success":true,"result":{"key":"val"}}}` + "\n"
 	var out, errOut bytes.Buffer

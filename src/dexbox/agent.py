@@ -40,7 +40,7 @@ class Agent:
         self,
         instruction: str,
         *,
-        max_iterations: int = 10,
+        max_iterations: int = 25,
     ) -> dict[str, Any]:
         """Execute a computer-use action sequence.
 

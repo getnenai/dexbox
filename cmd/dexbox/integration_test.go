@@ -123,7 +123,13 @@ def run(params: Input) -> Output:
 	// Check if dexbox is running
 	resp, err := http.Get("http://localhost:8600/health")
 	if err != nil || resp.StatusCode != http.StatusOK {
-		t.Skip("dexbox server is not running at http://localhost:8600. Start it with `make start` before running integration tests.")
+		t.Skip("dexbox Go server is not running at http://localhost:8600. Start it with `make build-cli && ./bin/dexbox server` before running integration tests.")
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get("http://localhost:8601/health")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Skip("dexbox Python backend is not running at http://localhost:8601. Start it with `DEXBOX_PORT=8601 uv run python -m dexbox.app` before running integration tests.")
 	}
 	resp.Body.Close()
 

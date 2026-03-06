@@ -89,39 +89,26 @@ RUN groupadd -f -g "${GID}" "${USERNAME}" && \
     chown ${UID}:${GID} /tmp/runtime-user /artifacts /mnt/tmp && \
     chmod 700 /tmp/runtime-user
 
+
+
 # ============================================================================
-# Stage 2: Python builder (for app dependencies)
+# Stage 3: Go builder (for dexbox CLI and server)
 # ============================================================================
-FROM ghcr.io/astral-sh/uv:trixie-slim AS python-builder
-ARG PYTHON_VERSION
-
-ENV UV_LINK_MODE=copy \
-    UV_PYTHON_INSTALL_DIR=/python \
-    UV_PYTHON_PREFERENCE=only-managed
-
-RUN uv python install ${PYTHON_VERSION}
-
+FROM golang:1.26 AS go-builder
 WORKDIR /app
-
-# Sync project (creates a portable venv in /app/.venv)
-COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --no-install-project
-
-# Copy application source and INSTALL the project
-COPY src/ src/
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ cmd/
+COPY internal/ internal/
+RUN CGO_ENABLED=0 go build -o /usr/local/bin/dexbox ./cmd/dexbox
 
 # ============================================================================
 # Stage 3: Final Runtime Image
 # ============================================================================
 FROM system-base AS runtime
 
-# Copy uv binary, portable Python installation, and synced .venv from builder
-COPY --from=python-builder /usr/local/bin/uv /usr/local/bin/uv
-COPY --from=python-builder --chown=${USERNAME}:${USERNAME} /python /python
-COPY --from=python-builder --chown=${USERNAME}:${USERNAME} /app /app
+# Copy Go binary
+COPY --from=go-builder /usr/local/bin/dexbox /usr/local/bin/dexbox
 
 # Supervisor + entrypoint config
 COPY docker/supervisord.conf /etc/supervisor/supervisord.conf
@@ -132,14 +119,8 @@ COPY docker/config/gtk-3.0 /home/${USERNAME}/.config/gtk-3.0
 COPY docker/config/libfm /home/${USERNAME}/.config/libfm
 
 # Fix ownership and permissions
-RUN chown -R ${UID}:${GID} /app /home/${USERNAME} && \
+RUN chown -R ${UID}:${GID} /home/${USERNAME} && \
     chmod +x /app/docker/bin/entrypoint.sh
-
-# Set PATH and uv-specific environment variables for the runtime
-ENV PATH="/app/.venv/bin:/python/bin:${PATH}" \
-    UV_PYTHON_INSTALL_DIR=/python \
-    UV_PYTHON_PREFERENCE=only-managed \
-    UV_LINK_MODE=copy
 
 WORKDIR /app
 

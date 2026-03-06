@@ -109,7 +109,11 @@ class AbstractComputerTool(ABC):
     def __init__(self):
         self.width = int(os.getenv("WIDTH") or 0)
         self.height = int(os.getenv("HEIGHT") or 0)
-        assert self.width and self.height, "WIDTH, HEIGHT must be set"
+        # Headless backend might not have WIDTH/HEIGHT set if it doesn't have a display
+        # and doesn't need to execute tools directly.
+        if not self.width or not self.height:
+            logger.warning("WIDTH/HEIGHT not set, computer tool may fail if actions are executed")
+            self._scaling_enabled = False
         if (display_num := os.getenv("DISPLAY_NUM")) is not None:
             self.display_num = int(display_num)
         else:
@@ -154,6 +158,8 @@ class AbstractComputerTool(ABC):
     def scale_coordinates(self, source: ScalingSource, x: int, y: int):
         if not self._scaling_enabled:
             return x, y
+        if self.width <= 0 or self.height <= 0:
+            raise ToolError("WIDTH/HEIGHT must be set before using computer actions")
         ratio = self.width / self.height
         target_dimension = None
         for dimension in MAX_SCALING_TARGETS.values():

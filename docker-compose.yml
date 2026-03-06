@@ -5,13 +5,13 @@ services:
       dockerfile: Dockerfile
     image: dexbox:latest
     ports:
-      - "8600:8600" # Parent service API
+      - "8600:8600" # dexbox server
       - "5900:5900" # VNC
       - "6080:6080" # noVNC (web browser VNC)
       - "5001:5001" # Screen recording API
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - DEXBOX_MODEL=${DEXBOX_MODEL:-claude-sonnet-4-5-20250929}
+      - DEXBOX_MODEL=${DEXBOX_MODEL:-claude-haiku-4-5-20251001}
       - DEXBOX_LOG_LEVEL=${DEXBOX_LOG_LEVEL:-INFO}
       - DRIVE_PATHS=${DRIVE_PATHS:-/mnt/tmp,/home/dexbox}
       - DEXBOX_SANDBOX_IMAGE=dexbox-sandbox-python:latest
@@ -30,6 +30,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Artifacts written by workflows are saved here
       - ./artifacts:/tmp/dexbox-artifacts
+      # Source code mounts for development/testing
+      - ./src:/app/src
+      # - ./bin/dexbox-linux:/usr/local/bin/dexbox
       # Optional: mount host directories for Drive access
       # - /path/to/host/files:/mnt/tmp
     restart: unless-stopped

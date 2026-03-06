@@ -210,6 +210,7 @@ __marimo__/
 artifacts/
 /dexbox
 /bin/
+cmd/dexbox/dexbox
 
 # macOS
 .DS_Store

@@ -4,44 +4,59 @@
 
 Run computer-use workflows locally using Docker. Workflows execute inside a sandboxed environment with access to a desktop environment.
 
-## Quick Start
-
-1. Build the images
-2. Create a `.env` file with your `ANTHROPIC_API_KEY`
-3. Start the desktop container
-4. Run a workflow
-5. Stop when done
-
-```bash
-make build
-
-cp .env.example .env # add your ANTHROPIC_API_KEY to .env
-
-dexbox start
-
-dexbox run examples/extract-data.py
-
-dexbox stop
-```
-
 ## Requirements
 
 - Docker Desktop (or Docker Engine on Linux)
-- Go 1.23+ (to build the CLI)
+- [Go 1.23+](https://go.dev/doc/install)
 - An Anthropic API key
 
-## Install the CLI
+## Quick Start
+
+Build the images
+
+```bash
+make build
+```
+
+Create a `.env` file with your `ANTHROPIC_API_KEY`
+
+```bash
+cp .env.example .env # add your ANTHROPIC_API_KEY to .env
+```
+
+Install the CLI
 
 ```bash
 go install github.com/getnenai/dexbox/cmd/dexbox@latest
 ```
 
+Start the desktop container
+
+```bash
+dexbox start
+```
+
+Run a workflow
+
+```bash
+dexbox run examples/extract-data.py
+```
+
+Stop when done
+
+```bash
+dexbox stop
+```
+
 ### Build and install locally:
+
 ```bash
 make install-cli
 # installed to ~/.local/bin/dexbox
 ```
+
 Or build only:
+
 ```bash
 make build-cli
 # binary is at ./bin/dexbox
@@ -54,6 +69,7 @@ make build
 ```
 
 This builds two images:
+
 - `dexbox:latest` — the desktop container (X11, VNC, parent service)
 - `dexbox-sandbox-python:latest` — the minimal sandbox container that runs workflow scripts
 
@@ -141,25 +157,25 @@ dexbox run examples/login-secure.py --secure-params '{"my_password": "hunter2"}'
 
 ### Required
 
-| Variable | Description |
-|---|---|
+| Variable            | Description                           |
+| ------------------- | ------------------------------------- |
 | `ANTHROPIC_API_KEY` | **Required.** Your Anthropic API key. |
 
 ### Optional
 
-| Variable | Default | Description |
-|---|---|---|
-| `DEXBOX_MODEL` | `claude-haiku-4-5-20251001` | LLM model to use. |
-| `DRIVE_PATHS` | `/mnt/tmp` | Comma-separated container host paths accessible to workflows. |
-| `DEXBOX_SANDBOX_IMAGE` | `dexbox-sandbox-python:latest` | Sandbox container image. |
-| `DEXBOX_SANDBOX_PULL_POLICY` | `never` | `never` or `always`. |
-| `DEXBOX_SANDBOX_TIMEOUT` | `600` | Max workflow duration (seconds). |
-| `DEXBOX_BACKEND` | `linux-desktop` | Desktop backend strategy (`linux-desktop` or `rdp`). |
-| `RDP_HOST` | — | RDP server hostname. Required if `DEXBOX_BACKEND=rdp`. |
-| `RDP_USERNAME` | — | Username for RDP. Required if `DEXBOX_BACKEND=rdp`. |
-| `RDP_PASSWORD` | — | Password for RDP. Required if `DEXBOX_BACKEND=rdp`. |
-| `RDP_SECURITY` | — | Security protocol for RDP (e.g. `rdp`, `tls`, `nla`). |
-| `RDP_RETRY_DELAY_SECONDS` | `60` | Minimum seconds between RDP reconnect attempts. |
+| Variable                     | Default                        | Description                                                   |
+| ---------------------------- | ------------------------------ | ------------------------------------------------------------- |
+| `DEXBOX_MODEL`               | `claude-haiku-4-5-20251001`    | LLM model to use.                                             |
+| `DRIVE_PATHS`                | `/mnt/tmp`                     | Comma-separated container host paths accessible to workflows. |
+| `DEXBOX_SANDBOX_IMAGE`       | `dexbox-sandbox-python:latest` | Sandbox container image.                                      |
+| `DEXBOX_SANDBOX_PULL_POLICY` | `never`                        | `never` or `always`.                                          |
+| `DEXBOX_SANDBOX_TIMEOUT`     | `600`                          | Max workflow duration (seconds).                              |
+| `DEXBOX_BACKEND`             | `linux-desktop`                | Desktop backend strategy (`linux-desktop` or `rdp`).          |
+| `RDP_HOST`                   | —                              | RDP server hostname. Required if `DEXBOX_BACKEND=rdp`.        |
+| `RDP_USERNAME`               | —                              | Username for RDP. Required if `DEXBOX_BACKEND=rdp`.           |
+| `RDP_PASSWORD`               | —                              | Password for RDP. Required if `DEXBOX_BACKEND=rdp`.           |
+| `RDP_SECURITY`               | —                              | Security protocol for RDP (e.g. `rdp`, `tls`, `nla`).         |
+| `RDP_RETRY_DELAY_SECONDS`    | `60`                           | Minimum seconds between RDP reconnect attempts.               |
 
 ### Using a `.env` file
 
@@ -195,12 +211,15 @@ make test # requires uv
 ```
 
 ### Python Unit Tests
-The unit tests validate the Python backend logic and can be run independently:
+
+The unit tests validate the Python SDK/runtime logic and can be run independently:
+
 ```bash
 make test-python
 ```
 
 ### Go Integration Tests
+
 The integration tests validate the `dexbox` CLI and the orchestration of the LLM Sandbox. **You must have the desktop container running before executing the integration tests:**
 
 ```bash
@@ -220,7 +239,7 @@ make lint
 ```
 dexbox CLI (Go)
     │
-    └─► POST /run ──► dexbox container (FastAPI)
+    └─► POST /run ──► dexbox container (Go Server)
                             │
                             ├─ Debian desktop (Xvfb + openbox)
                             ├─ VNC server (TigerVNC) or RDP client (xfreerdp)
@@ -234,4 +253,4 @@ dexbox CLI (Go)
 
 ## License
 
-MIT
+[Apache 2.0](https://github.com/getnenai/nen-desktop/tree/main?tab=Apache-2.0-1-ov-file)

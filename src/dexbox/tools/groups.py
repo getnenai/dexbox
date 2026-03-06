@@ -5,9 +5,6 @@ from dataclasses import dataclass
 
 from dexbox.provider import AnthropicModel
 
-from .collection import ToolCollection
-from .computer import ComputerToolDexbox_X11
-
 _EXTRA_OPTIONS_BY_API_TYPE: dict[str, dict[str, object]] = {
     "computer_20251124": {"enable_zoom": True},
 }
@@ -70,8 +67,3 @@ def get_model_tool_spec(model: str | None) -> ModelToolSpec:
 
     supported = ", ".join(sorted(MODEL_TOOL_SPECS.keys()))
     raise ValueError(f"Model '{model}' is not supported. Available models: {supported}")
-
-
-def build_runtime_tools() -> ToolCollection:
-    """Build the tool collection for local execution inside the desktop container."""
-    return ToolCollection(ComputerToolDexbox_X11())

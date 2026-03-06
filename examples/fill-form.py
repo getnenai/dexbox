@@ -25,9 +25,9 @@ def run(params: Params) -> Result:
     computer.press("Return")
 
     # Fill in test JSON value
-    agent.execute("Click in the JSON data/URL text area", max_iterations=52)
+    agent.execute("Click in the JSON data/URL text area")
     computer.type(params.json_text)
-    agent.execute("Click process button", max_iterations=5)
+    agent.execute("Click process button")
 
     # Validate the test JSON
     if not agent.verify("Is the JSON valid?"):

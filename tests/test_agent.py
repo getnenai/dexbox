@@ -27,7 +27,7 @@ def test_agent_execute_success() -> None:
     assert result["success"] is True
     mock_call.assert_called_once_with(
         "/internal/workflow/execute",
-        json={"instruction": "Click the submit button", "max_iterations": 10},
+        json={"instruction": "Click the submit button", "max_iterations": 25},
     )
 
 

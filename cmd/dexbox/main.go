@@ -71,7 +71,7 @@ func main() {
 
 	root.PersistentFlags().StringVarP(&envFile, "env-file", "e", "", "Path to .env file")
 
-	root.AddCommand(cmdStart(), cmdStop(), cmdCancel(), cmdRun(), cmdLogs(), cmdStatus())
+	root.AddCommand(cmdStart(), cmdStop(), cmdCancel(), cmdRun(), cmdLogs(), cmdStatus(), cmdServer())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -434,6 +434,11 @@ func streamRun(r io.Reader, workflowID string, stdout, stderr io.Writer) (int, e
 				}
 				duration := e.Get("data.duration_ms").Int()
 				fmt.Fprintf(stdout, "✓  Workflow completed in %d ms\n", duration)
+
+				if assetsURL := e.Get("data.assets_url").String(); assetsURL != "" {
+					fmt.Fprintf(stdout, "🔗  Assets URL: %s\n", assetsURL)
+				}
+
 				if result := e.Get("data.result"); result.Exists() && result.Raw != "" {
 					fmt.Fprintln(stdout, result.Raw)
 				} else {
