@@ -253,4 +253,6 @@ dexbox CLI (Go)
 
 ## License
 
-[Apache 2.0](https://github.com/getnenai/nen-desktop/tree/main?tab=Apache-2.0-1-ov-file)
+This project is licensed under the [Apache License 2.0](LICENSE).
+
+For information on the licenses of third-party dependencies used in this project, please see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
