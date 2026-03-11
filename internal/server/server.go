@@ -17,13 +17,19 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/getnenai/dexbox/internal/agent"
 	"github.com/getnenai/dexbox/internal/anthropic"
+	"github.com/getnenai/dexbox/internal/openai"
 	"github.com/getnenai/dexbox/internal/sandbox"
 	"github.com/getnenai/dexbox/internal/tools"
+	"github.com/getnenai/dexbox/pkg/cua"
 )
 
 type RunRequest struct {
 	Script           string            `json:"script"`
 	APIKey           string            `json:"api_key"`
+	AnthropicAPIKey  string            `json:"anthropic_api_key,omitempty"`
+	OpenAIAPIKey     string            `json:"openai_api_key,omitempty"`
+	LuxAPIKey        string            `json:"lux_api_key,omitempty"`
+	GeminiAPIKey     string            `json:"gemini_api_key,omitempty"`
 	Model            string            `json:"model"`
 	Provider         string            `json:"provider"`
 	AnthropicBaseURL string            `json:"anthropic_base_url,omitempty"`
@@ -31,16 +37,35 @@ type RunRequest struct {
 	SecureParams     map[string]string `json:"secure_params,omitempty"`
 	WorkflowID       string            `json:"workflow_id"`
 	RuntimeExtension string            `json:"runtime_extension"`
+	OpenAIBaseURL    string            `json:"openai_base_url,omitempty"`
 }
 
 type Options struct {
-	ListenAddr string
+	ListenAddr    string
+	OpenAIBaseURL string
 }
 
 var runLock sync.Mutex
 var orchestrator *sandbox.SandboxOrchestrator
 var sessionManager *SessionManager
 var computerTool *tools.ComputerTool
+
+func getProviderForModel(model string) string {
+	lowerModel := strings.ToLower(model)
+	if strings.HasPrefix(lowerModel, "claude-") {
+		return "anthropic"
+	}
+	if strings.HasPrefix(lowerModel, "gpt-") || strings.HasPrefix(lowerModel, "o1") || strings.HasPrefix(lowerModel, "o3") {
+		return "openai"
+	}
+	if strings.HasPrefix(lowerModel, "gemini-") {
+		return "gemini"
+	}
+	if lowerModel == "lux" || strings.HasPrefix(lowerModel, "lux-") {
+		return "lux"
+	}
+	return ""
+}
 
 func Run(opts Options) error {
 	var err error
@@ -137,6 +162,10 @@ func handleRun(w http.ResponseWriter, r *http.Request) {
 
 	session := &Session{
 		APIKey:           req.APIKey,
+		AnthropicAPIKey:  req.AnthropicAPIKey,
+		OpenAIAPIKey:     req.OpenAIAPIKey,
+		LuxAPIKey:        req.LuxAPIKey,
+		GeminiAPIKey:     req.GeminiAPIKey,
 		Model:            req.Model,
 		Provider:         req.Provider,
 		AnthropicBaseURL: req.AnthropicBaseURL,
@@ -144,6 +173,7 @@ func handleRun(w http.ResponseWriter, r *http.Request) {
 		Variables:        req.Variables,
 		SecureParams:     req.SecureParams,
 		Code:             req.Script,
+		OpenAIBaseURL:    req.OpenAIBaseURL,
 	}
 	token := sessionManager.CreateSession(session)
 	log.Printf("Created session %s", token)
@@ -325,15 +355,36 @@ func handleWorkflowOutput(w http.ResponseWriter, r *http.Request, session *Sessi
 }
 
 func handleWorkflowAssets(w http.ResponseWriter, r *http.Request, session *Session) {
-	// For now, we can write the tar file to disk or just discard it.
-	// Since the orchestrator previously wrote to /tmp/dexbox-artifacts, we can do the same.
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// The zip file from the sandbox container
+	zipFilename := session.WorkflowID + ".zip"
+
+	// For now, optionally write the zip file to disk.
 	artifactsDir := "/tmp/dexbox-artifacts"
 	os.MkdirAll(artifactsDir, 0755)
+	if err := os.WriteFile(filepath.Join(artifactsDir, zipFilename), bodyBytes, 0644); err != nil {
+		log.Printf("Failed to write zip file: %v", err)
+	}
 
-	outFile, err := os.Create(filepath.Join(artifactsDir, session.WorkflowID+".tar"))
-	if err == nil {
-		defer outFile.Close()
-		io.Copy(outFile, r.Body)
+	// Notify the CLI that assets were saved (without streaming the full content)
+	if len(bodyBytes) > 0 {
+		assetFilename := fmt.Sprintf("assets/%s/assets.zip", session.WorkflowID)
+		log.Printf("Assets saved: %s (%d bytes)", assetFilename, len(bodyBytes))
+		session.EventQueue <- map[string]any{
+			"type": "progress",
+			"data": map[string]any{
+				"type": "assets",
+				"data": map[string]string{
+					"filename": assetFilename,
+					"size":     fmt.Sprintf("%d", len(bodyBytes)),
+				},
+			},
+		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]any{"success": true})
@@ -361,17 +412,34 @@ func handleExecute(w http.ResponseWriter, r *http.Request, session *Session) {
 		model = req.ModelOverride
 	}
 
+	providerStr := getProviderForModel(model)
+	if providerStr == "" {
+		providerStr = session.Provider // Fallback
+	}
+
 	// Create a new agent and run it
 	importAgent := "github.com/getnenai/dexbox/internal/agent"
 	_ = importAgent // Ensure agent is imported in the file though we will add imports
 
-	log.Printf("Execute request: model=%s", model)
+	log.Printf("Execute request: sessionModel=%q, reqModelOverride=%q, finalModel=%q, inferredProvider=%q", session.Model, req.ModelOverride, model, providerStr)
 
 	// Execute the agent Loop
-	// To avoid circular or missing imports, we'll need to make sure the imports are updated right after.
-	// However, I need to add agent to the imports of this file. Let's do that in a separate chunk.
-	ag := agent.NewAgent(session.APIKey, session.AnthropicBaseURL, session.EventQueue)
-	messages, err := ag.SamplingLoop(r.Context(), model, req.Instruction, maxIter)
+	var provider cua.Provider
+	if providerStr == "openai" {
+		key := session.OpenAIAPIKey
+		if key == "" {
+			key = session.APIKey // fallback
+		}
+		provider = openai.NewClient(key, model, session.OpenAIBaseURL)
+	} else {
+		key := session.AnthropicAPIKey
+		if key == "" {
+			key = session.APIKey
+		}
+		provider = anthropic.NewClient(key, model, session.AnthropicBaseURL)
+	}
+	ag := agent.NewAgent(provider, session.EventQueue)
+	messages, err := ag.SamplingLoop(r.Context(), req.Instruction, maxIter)
 
 	if err != nil {
 		log.Printf("execute failed: %v", err)
@@ -416,25 +484,34 @@ func handleValidate(w http.ResponseWriter, r *http.Request, session *Session) {
 		model = req.ModelOverride
 	}
 
-	prompt := fmt.Sprintf("Look at this screenshot and answer: %s\n\nRespond with JSON: {\"is_match\": true/false, \"match_reason\": \"brief explanation\"}", req.Question)
-
-	// Create anthropic request
-	client := anthropic.NewClient(session.APIKey, session.AnthropicBaseURL)
-	apiReq := &anthropic.CreateMessageRequest{
-		Model: model, MaxTokens: 256,
-		Messages: []anthropic.Message{{Role: "user", Content: []anthropic.ContentBlock{
-			{Type: "image", Source: &anthropic.ImageSource{Type: "base64", MediaType: "image/png", Data: b64}},
-			{Type: "text", Text: prompt},
-		}}},
+	providerStr := getProviderForModel(model)
+	if providerStr == "" {
+		providerStr = session.Provider // Fallback
 	}
 
-	resp, err := client.CreateMessage(r.Context(), apiReq, nil)
+	prompt := fmt.Sprintf("Look at this screenshot and answer: %s\n\nRespond with JSON: {\"is_match\": true/false, \"match_reason\": \"brief explanation\"}", req.Question)
+
+	var text string
+	if providerStr == "openai" {
+		key := session.OpenAIAPIKey
+		if key == "" {
+			key = session.APIKey
+		}
+		client := openai.NewClient(key, model, session.OpenAIBaseURL)
+		text, err = client.CallDirect(r.Context(), prompt, b64, 256)
+	} else {
+		key := session.AnthropicAPIKey
+		if key == "" {
+			key = session.APIKey
+		}
+		client := anthropic.NewClient(key, model, session.AnthropicBaseURL)
+		text, err = client.CallDirect(r.Context(), prompt, b64, 256)
+	}
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
 		return
 	}
 
-	text := resp.Content[0].Text
 	var res map[string]any
 	// Simple JSON extraction
 	start := strings.Index(text, "{")
@@ -473,25 +550,35 @@ func handleExtract(w http.ResponseWriter, r *http.Request, session *Session) {
 		model = req.ModelOverride
 	}
 
+	providerStr := getProviderForModel(model)
+	if providerStr == "" {
+		providerStr = session.Provider // Fallback
+	}
+
 	schemaBytes, _ := json.Marshal(req.SchemaDef)
 	prompt := fmt.Sprintf("Look at this screenshot. %s\n\nReturn your answer as JSON matching this schema: %s\nReturn ONLY valid JSON, do not include markdown formatting or explanations.", req.Query, string(schemaBytes))
 
-	client := anthropic.NewClient(session.APIKey, session.AnthropicBaseURL)
-	apiReq := &anthropic.CreateMessageRequest{
-		Model: model, MaxTokens: 1024,
-		Messages: []anthropic.Message{{Role: "user", Content: []anthropic.ContentBlock{
-			{Type: "image", Source: &anthropic.ImageSource{Type: "base64", MediaType: "image/png", Data: b64}},
-			{Type: "text", Text: prompt},
-		}}},
+	var text string
+	if providerStr == "openai" {
+		key := session.OpenAIAPIKey
+		if key == "" {
+			key = session.APIKey
+		}
+		client := openai.NewClient(key, model, session.OpenAIBaseURL)
+		text, err = client.CallDirect(r.Context(), prompt, b64, 1024)
+	} else {
+		key := session.AnthropicAPIKey
+		if key == "" {
+			key = session.APIKey
+		}
+		client := anthropic.NewClient(key, model, session.AnthropicBaseURL)
+		text, err = client.CallDirect(r.Context(), prompt, b64, 1024)
 	}
-
-	resp, err := client.CreateMessage(r.Context(), apiReq, []string{"prompt-caching-2024-07-31"})
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
 		return
 	}
 
-	text := resp.Content[0].Text
 	var res map[string]any
 	start := strings.Index(text, "{")
 	end := strings.LastIndex(text, "}")

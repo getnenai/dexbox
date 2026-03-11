@@ -7,6 +7,7 @@ import (
 
 func cmdServer() *cobra.Command {
 	var listenAddr string
+	var openaiBaseURL string
 
 	cmd := &cobra.Command{
 		Use:   "server",
@@ -14,7 +15,8 @@ func cmdServer() *cobra.Command {
 		Long:  `Starts the Go-based server that handles API requests for the dexbox CLI.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return server.Run(server.Options{
-				ListenAddr: listenAddr,
+				ListenAddr:    listenAddr,
+				OpenAIBaseURL: openaiBaseURL,
 			})
 		},
 	}

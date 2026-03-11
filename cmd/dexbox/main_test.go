@@ -430,7 +430,7 @@ func TestCmdRun_DefaultModel(t *testing.T) {
 
 	var payload map[string]interface{}
 	json.Unmarshal(captured, &payload)
-	if payload["model"] != "claude-haiku-4-5-20251001" {
+	if payload["model"] != "claude-opus-4-6" {
 		t.Errorf("expected default model, got %v", payload["model"])
 	}
 }

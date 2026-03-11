@@ -163,7 +163,9 @@ func cmdRun() *cobra.Command {
 		timeout          int
 		model            string
 		anthropicBaseURL string
+		openaiBaseURL    string
 		noBrowser        bool
+		provider         string
 	)
 
 	cmd := &cobra.Command{
@@ -195,29 +197,71 @@ func cmdRun() *cobra.Command {
 				}
 			}
 
-			apiKey := os.Getenv("ANTHROPIC_API_KEY")
-			if apiKey == "" {
-				return fmt.Errorf("ANTHROPIC_API_KEY environment variable is required")
-			}
+			// Gather ALL API keys. We still grab the "primary" key for backwards compatibility,
+			// but the new way injects all so the model override can switch backends dynamically.
+			anthropicAPIKey := os.Getenv("ANTHROPIC_API_KEY")
+			openAIAPIKey := os.Getenv("OPENAI_API_KEY")
+
 			if model == "" {
 				model = os.Getenv("DEXBOX_MODEL")
 				if model == "" {
-					model = "claude-haiku-4-5-20251001"
+					model = "claude-opus-4-6"
+				}
+			}
+
+			if openaiBaseURL == "" {
+				openaiBaseURL = os.Getenv("OPENAI_BASE_URL")
+			}
+
+			// If provider wasn't passed, try to guess from the model, or fallback to anthropic
+			inferredProvider := provider
+			if inferredProvider == "" {
+				lowerModel := strings.ToLower(model)
+				if strings.HasPrefix(lowerModel, "gpt-") || strings.HasPrefix(lowerModel, "o1") || strings.HasPrefix(lowerModel, "o3") {
+					inferredProvider = "openai"
+				} else {
+					inferredProvider = "anthropic"
+				}
+			}
+
+			var primaryAPIKey string
+			switch inferredProvider {
+			case "openai":
+				primaryAPIKey = openAIAPIKey
+				if primaryAPIKey == "" {
+					return fmt.Errorf("OPENAI_API_KEY environment variable is required when using openai provider")
+				}
+				if model == "" {
+					model = os.Getenv("DEXBOX_MODEL")
+					if model == "" {
+						model = "gpt-4.5-preview"
+					}
+				}
+			default:
+				primaryAPIKey = anthropicAPIKey
+				if primaryAPIKey == "" {
+					return fmt.Errorf("ANTHROPIC_API_KEY environment variable is required for anthropic/default provider")
 				}
 			}
 
 			workflowID := filepath.Base(scriptPath)
 
 			payload := map[string]interface{}{
-				"script":        string(script),
-				"api_key":       apiKey,
-				"model":         model,
-				"workflow_id":   workflowID,
-				"variables":     variables,
-				"secure_params": secureParams,
+				"script":            string(script),
+				"api_key":           primaryAPIKey,
+				"anthropic_api_key": anthropicAPIKey,
+				"openai_api_key":    openAIAPIKey,
+				"model":             model,
+				"provider":          inferredProvider,
+				"workflow_id":       workflowID,
+				"variables":         variables,
+				"secure_params":     secureParams,
 			}
 			if anthropicBaseURL != "" {
 				payload["anthropic_base_url"] = anthropicBaseURL
+			}
+			if openaiBaseURL != "" {
+				payload["openai_base_url"] = openaiBaseURL
 			}
 
 			body, err := json.Marshal(payload)
@@ -266,7 +310,9 @@ func cmdRun() *cobra.Command {
 	cmd.Flags().StringVar(&artifactsDir, "artifacts", "", "Directory to save workflow artifacts")
 	cmd.Flags().IntVar(&timeout, "timeout", 600, "Workflow timeout in seconds")
 	cmd.Flags().StringVar(&model, "model", "", "LLM model override")
+	cmd.Flags().StringVar(&provider, "provider", "", "Provider to use (anthropic, openai)")
 	cmd.Flags().StringVar(&anthropicBaseURL, "anthropic-base-url", "", "Override the base URL for Anthropic API requests")
+	cmd.Flags().StringVar(&openaiBaseURL, "openai-base-url", "", "Override the base URL for OpenAI API requests")
 	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "Do not launch the browser for the dexbox stream")
 	return cmd
 }
@@ -419,6 +465,10 @@ func streamRun(r io.Reader, workflowID string, stdout, stderr io.Writer) (int, e
 				data, err := base64.StdEncoding.DecodeString(contentB64)
 				if err != nil {
 					fmt.Fprintf(stderr, "✗  Failed to decode assets: %v\n", err)
+					break
+				}
+				if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+					fmt.Fprintf(stderr, "✗  Failed to create directory for %s: %v\n", filename, err)
 					break
 				}
 				if err := os.WriteFile(filename, data, 0644); err != nil {

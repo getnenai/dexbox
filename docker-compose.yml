@@ -11,6 +11,9 @@ services:
       - "5001:5001" # Screen recording API
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LUX_API_KEY=${LUX_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - DEXBOX_MODEL=${DEXBOX_MODEL:-claude-haiku-4-5-20251001}
       - DEXBOX_LOG_LEVEL=${DEXBOX_LOG_LEVEL:-INFO}
       - DRIVE_PATHS=${DRIVE_PATHS:-/mnt/tmp,/home/dexbox}

@@ -208,6 +208,7 @@ __marimo__/
 
 # Dexbox
 artifacts/
+assets/
 /dexbox
 /bin/
 cmd/dexbox/dexbox

@@ -11,9 +11,14 @@ import (
 type Session struct {
 	Token            string              `json:"token"`
 	APIKey           string              `json:"api_key"`
+	AnthropicAPIKey  string              `json:"anthropic_api_key,omitempty"`
+	OpenAIAPIKey     string              `json:"openai_api_key,omitempty"`
+	LuxAPIKey        string              `json:"lux_api_key,omitempty"`
+	GeminiAPIKey     string              `json:"gemini_api_key,omitempty"`
 	Model            string              `json:"model"`
 	Provider         string              `json:"provider"`
 	AnthropicBaseURL string              `json:"anthropic_base_url,omitempty"`
+	OpenAIBaseURL    string              `json:"openai_base_url,omitempty"`
 	WorkflowID       string              `json:"workflow_id"`
 	Variables        map[string]any      `json:"variables,omitempty"`
 	SecureParams     map[string]string   `json:"secure_params,omitempty"`

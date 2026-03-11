@@ -8,50 +8,43 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/getnenai/dexbox/internal/anthropic"
 	"github.com/getnenai/dexbox/internal/tools"
+	"github.com/getnenai/dexbox/pkg/cua"
 )
 
-const MaxImagesInContext = 10
-const MaxTokens = 4096
-
 type Agent struct {
-	client       *anthropic.Client
+	provider     cua.Provider
 	computerTool *tools.ComputerTool
 	events       chan map[string]any
 }
 
-func NewAgent(apiKey string, baseURL string, events chan map[string]any) *Agent {
+func NewAgent(provider cua.Provider, events chan map[string]any) *Agent {
 	return &Agent{
-		client:       anthropic.NewClient(apiKey, baseURL),
+		provider:     provider,
 		computerTool: tools.NewComputerTool(),
 		events:       events,
 	}
 }
 
-// SamplingLoop drives the VLM sampling loop.
-func (a *Agent) SamplingLoop(ctx context.Context, model string, instruction string, maxIterations int) ([]anthropic.Message, error) {
-	// Emit started event
+// SamplingLoop drives the CUA sampling loop.
+func (a *Agent) SamplingLoop(ctx context.Context, instruction string, maxIterations int) ([]cua.Message, error) {
 	if a.events != nil {
 		a.events <- map[string]any{
 			"type": "progress",
 			"data": map[string]any{
 				"type": "log",
-				"data": fmt.Sprintf("Starting execution with model %s, instruction: %s", model, instruction),
+				"data": fmt.Sprintf("Starting execution, instruction: %s", instruction),
 			},
 		}
 	}
 
-	messages := []anthropic.Message{
+	messages := []cua.Message{
 		{
-			Role: "user",
-			Content: []anthropic.ContentBlock{
-				{Type: "text", Text: instruction},
-			},
+			Role:    "user",
+			Content: instruction,
 		},
 	}
 
-	// Define tools based on model (we hardcode for computer_20250124 or computer_20241022 as fallback)
 	width := 0
 	if w := os.Getenv("WIDTH"); w != "" {
 		width, _ = strconv.Atoi(w)
@@ -66,331 +59,274 @@ func (a *Agent) SamplingLoop(ctx context.Context, model string, instruction stri
 		scaledHeight = height
 	}
 
-	displayNum := 0
-	if d := os.Getenv("DISPLAY_NUM"); d != "" {
-		displayNum, _ = strconv.Atoi(d)
+	err := a.provider.Setup(cua.DisplayConfig{
+		WidthPX:  scaledWidth,
+		HeightPX: scaledHeight,
+	})
+	if err != nil {
+		return messages, fmt.Errorf("provider setup failed: %w", err)
 	}
 
-	apiType := "computer_20250124"
-	betaFlag := "computer-use-2025-01-24"
-
-	// Match logic from src/dexbox/tools/groups.py
-	if model == "claude-opus-4-6" || model == "claude-sonnet-4-6" {
-		apiType = "computer_20251124"
-		betaFlag = "computer-use-2025-11-24"
-	}
-
-	toolList := []anthropic.Tool{
-		{
-			Type:            apiType,
-			Name:            "computer",
-			DisplayWidthPx:  scaledWidth,
-			DisplayHeightPx: scaledHeight,
-			DisplayNumber:   displayNum,
-		},
-	}
-
-	betas := []string{betaFlag, "prompt-caching-2024-07-31"}
+	var state cua.VisualState
 
 	for iteration := 0; iteration < maxIterations; iteration++ {
-		// Filter images
-		maybeFilterImages(messages)
-
-		req := &anthropic.CreateMessageRequest{
-			Model:     model,
-			MaxTokens: MaxTokens,
-			Messages:  messages,
-			Tools:     toolList,
-		}
-
-		resp, err := a.client.CreateMessage(ctx, req, betas)
-		if err != nil {
-			return messages, fmt.Errorf("anthropic api error: %w", err)
-		}
-
-		// Convert response content to message format
-		var assistantContent []anthropic.ContentBlock
-		var toolUses []anthropic.ContentBlock
-
-		for _, block := range resp.Content {
-			if block.Type == "text" {
-				assistantContent = append(assistantContent, anthropic.ContentBlock{Type: "text", Text: block.Text})
-				if block.Text != "" {
-					log.Printf("Agent thought: %s", block.Text)
-					if a.events != nil {
-						a.events <- map[string]any{
-							"type": "progress",
-							"data": map[string]any{
-								"type": "text",
-								"data": block.Text,
-							},
-						}
-					}
-				}
-			} else if block.Type == "tool_use" {
-				assistantContent = append(assistantContent, anthropic.ContentBlock{
-					Type:  "tool_use",
-					ID:    block.ID,
-					Name:  block.Name,
-					Input: block.Input,
-				})
-				toolUses = append(toolUses, block)
+		// Refresh the visual state with a new screenshot, unless the previous
+		// action already set state to a zoomed image (in which case the model
+		// should see the zoom result rather than a fresh full screenshot).
+		if a.provider.NeedsVisuals() && state.ImageBase64 == "" {
+			b64, err := a.computerTool.Screenshot(ctx, "/tmp")
+			if err != nil {
+				return messages, fmt.Errorf("failed to take required screenshot: %w", err)
+			}
+			if b64 == "" {
+				return messages, fmt.Errorf("screenshot returned empty base64 string")
+			}
+			state = cua.VisualState{
+				ImageBase64: b64,
+				Format:      "png",
 			}
 		}
 
-		messages = append(messages, anthropic.Message{
-			Role:    "assistant",
-			Content: assistantContent,
-		})
+		action, assistantText, err := a.provider.PredictAction(ctx, messages, state)
+		if err != nil {
+			if err.Error() == "no computer tool use block found in response" {
+				// No action returned => End of turn
+				break
+			}
+			return messages, fmt.Errorf("provider predict error: %w", err)
+		}
 
-		if resp.StopReason == "end_turn" || len(toolUses) == 0 {
+		if action == nil {
+			if assistantText != "" {
+				messages = append(messages, cua.Message{
+					Role:    "assistant",
+					Content: assistantText,
+				})
+			}
 			break
 		}
 
-		// Execute tool calls
-		var toolResults []anthropic.ContentBlock
-		for _, toolUse := range toolUses {
-			if a.events != nil {
-				a.events <- map[string]any{
-					"type": "progress",
-					"data": map[string]any{
-						"type": "tool_call",
-						"data": map[string]any{
-							"name":  toolUse.Name,
-							"input": toolUse.Input,
-						},
-					},
+		log.Printf("Agent action: %v", action.Type)
+
+		if a.events != nil {
+			actionMap := map[string]any{
+				"action": string(action.Type),
+			}
+			if action.Text != "" {
+				actionMap["text"] = action.Text
+			} else if action.Type == cua.ActionMouseMove || action.Type == cua.ActionDrag {
+				if action.X != nil && action.Y != nil {
+					actionMap["coordinate"] = []int{*action.X, *action.Y}
 				}
-			}
-
-			// We only support the computer tool internally here for now
-			var resultStr string
-			var resultB64 string
-			var resultErr error
-
-			if toolUse.Name == "computer" {
-				resultStr, resultB64, resultErr = a.executeComputerTool(ctx, toolUse.Input)
-			} else {
-				resultErr = fmt.Errorf("unknown tool: %s", toolUse.Name)
-			}
-
-			if resultErr != nil {
-				log.Printf("Tool %s failed: %v", toolUse.Name, resultErr)
-			} else {
-				log.Printf("Tool %s succeeded", toolUse.Name)
-			}
-
-			errStr := ""
-			if resultErr != nil {
-				errStr = resultErr.Error()
-			}
-
-			if a.events != nil {
-				a.events <- map[string]any{
-					"type": "progress",
-					"data": map[string]any{
-						"type": "tool_result",
-						"data": map[string]any{
-							"name":  toolUse.Name,
-							"error": errStr,
-						},
-					},
+			} else if action.Type == cua.ActionClick || action.Type == cua.ActionRightClick || action.Type == cua.ActionMiddleClick || action.Type == cua.ActionDoubleClick || action.Type == cua.ActionTripleClick {
+				if action.HasCoordinate && action.X != nil && action.Y != nil {
+					actionMap["coordinate"] = []int{*action.X, *action.Y}
 				}
+			} else if action.Type == cua.ActionWait && action.Duration > 0 {
+				actionMap["duration"] = action.Duration
 			}
 
-			// Format tool result block
-			var contentBlocks []anthropic.ContentBlock
-			if resultStr != "" {
-				contentBlocks = append(contentBlocks, anthropic.ContentBlock{Type: "text", Text: resultStr})
-			}
-			if resultB64 != "" {
-				contentBlocks = append(contentBlocks, anthropic.ContentBlock{
-					Type: "image",
-					Source: &anthropic.ImageSource{
-						Type:      "base64",
-						MediaType: "image/png",
-						Data:      resultB64,
+			a.events <- map[string]any{
+				"type": "progress",
+				"data": map[string]any{
+					"type": "tool_call",
+					"data": map[string]any{
+						"name":  "computer",
+						"input": actionMap,
 					},
-				})
+				},
 			}
-			if resultErr != nil {
-				contentBlocks = append(contentBlocks, anthropic.ContentBlock{Type: "text", Text: resultErr.Error()})
-			}
-
-			// Anthropic content for tool_result can be a string or a list of blocks.
-			toolResults = append(toolResults, anthropic.ContentBlock{
-				Type:      "tool_result",
-				ToolUseID: toolUse.ID,
-				Content:   contentBlocks,
-				IsError:   resultErr != nil,
-			})
 		}
 
-		messages = append(messages, anthropic.Message{
-			Role:    "user",
-			Content: toolResults,
+		// Clear state so a fresh screenshot is taken next iteration by default.
+		state = cua.VisualState{}
+
+		zoomedImg, err := a.executeAction(ctx, action)
+		if err != nil {
+			log.Printf("Tool failed: %v", err)
+		} else {
+			log.Printf("Tool succeeded")
+			if zoomedImg != "" {
+				// Propagate the zoomed image so the next iteration sends it to
+				// the model instead of taking a new full screenshot.
+				state = cua.VisualState{
+					ImageBase64: zoomedImg,
+					Format:      "png",
+				}
+			}
+		}
+
+		delaySec := 2.0
+		if d := os.Getenv("SCREENSHOT_DELAY"); d != "" {
+			if parsed, err := strconv.ParseFloat(d, 64); err == nil {
+				delaySec = parsed
+			}
+		}
+		if action.Type == cua.ActionWait && action.Duration > 0 {
+			delaySec = action.Duration
+		}
+		time.Sleep(time.Duration(delaySec * float64(time.Second)))
+
+		errStr := ""
+		if err != nil {
+			errStr = err.Error()
+		}
+
+		if a.events != nil {
+			a.events <- map[string]any{
+				"type": "progress",
+				"data": map[string]any{
+					"type": "tool_result",
+					"data": map[string]any{
+						"name":  "computer",
+						"error": errStr,
+					},
+				},
+			}
+		}
+
+		// Record the tool result back into history
+		messages = append(messages, cua.Message{
+			Role:    "assistant",
+			Content: assistantText,
+			Action:  action,
+		})
+
+		resText := "Completed"
+		if err != nil {
+			resText = "Error: " + err.Error()
+		}
+		messages = append(messages, cua.Message{
+			Role:       "user",
+			Result:     resText,
+			ToolCallID: action.ToolCallID,
 		})
 	}
 
-	return messages, fmt.Errorf("hit max iterations (%d) without completing task", maxIterations)
+	return messages, nil
 }
 
-func (a *Agent) executeComputerTool(ctx context.Context, input any) (string, string, error) {
-	inputMap, ok := input.(map[string]any)
-	if !ok {
-		return "", "", fmt.Errorf("invalid input type")
-	}
-
-	action, _ := inputMap["action"].(string)
+// executeAction executes a single CUA action. It returns a non-empty base64
+// image string when the action produced a zoomed screenshot (ActionZoom), so
+// the caller can feed it directly into the next model call instead of taking
+// a new full screenshot.
+func (a *Agent) executeAction(ctx context.Context, action *cua.Action) (string, error) {
 	var err error
+	var zoomedImg string
 
-	switch action {
-	case "key":
-		text, _ := inputMap["text"].(string)
-		err = a.computerTool.Key(ctx, text)
-	case "type":
-		text, _ := inputMap["text"].(string)
-		err = a.computerTool.Type(ctx, text)
-	case "mouse_move":
-		coords, ok := inputMap["coordinate"].([]any)
-		if ok && len(coords) >= 2 {
-			x := int(coords[0].(float64))
-			y := int(coords[1].(float64))
-			x, y = a.computerTool.ScaleCoordinates(tools.ScalingSourceAPI, x, y)
-			err = a.computerTool.Move(ctx, x, y)
-		} else {
-			return "", "", fmt.Errorf("invalid coordinate")
-		}
-	case "left_click", "right_click", "middle_click":
-		coords, ok := inputMap["coordinate"].([]any)
-		if ok && len(coords) >= 2 {
-			x := int(coords[0].(float64))
-			y := int(coords[1].(float64))
-			x, y = a.computerTool.ScaleCoordinates(tools.ScalingSourceAPI, x, y)
+	switch action.Type {
+	case cua.ActionKey:
+		err = a.computerTool.Key(ctx, action.Text)
+	case cua.ActionTypeString:
+		err = a.computerTool.Type(ctx, action.Text)
+	case cua.ActionMouseMove:
+		x, y := a.computerTool.ScaleCoordinates(tools.ScalingSourceAPI, *action.X, *action.Y)
+		err = a.computerTool.Move(ctx, x, y)
+	case cua.ActionClick, cua.ActionRightClick, cua.ActionMiddleClick:
+		if action.HasCoordinate {
+			x, y := a.computerTool.ScaleCoordinates(tools.ScalingSourceAPI, *action.X, *action.Y)
 			if err = a.computerTool.Move(ctx, x, y); err != nil {
-				return "", "", err
+				return "", err
 			}
 		}
 
 		button := "left"
-		if action == "right_click" {
+		if action.Type == cua.ActionRightClick {
 			button = "right"
-		} else if action == "middle_click" {
+		} else if action.Type == cua.ActionMiddleClick {
 			button = "middle"
 		}
 		err = a.computerTool.Click(ctx, button)
-	case "left_click_drag":
-		coords, ok := inputMap["coordinate"].([]any)
-		if ok && len(coords) >= 2 {
-			x := int(coords[0].(float64))
-			y := int(coords[1].(float64))
-			x, y = a.computerTool.ScaleCoordinates(tools.ScalingSourceAPI, x, y)
-			// Approximate drag by clicking - we may need a specific drag implement in tools
+	case cua.ActionDrag:
+		if action.HasCoordinate {
+			x, y := a.computerTool.ScaleCoordinates(tools.ScalingSourceAPI, *action.X, *action.Y)
 			err = a.computerTool.Move(ctx, x, y)
-			if err == nil {
-				err = a.computerTool.Click(ctx, "left")
-			}
-		} else {
-			return "", "", fmt.Errorf("invalid coordinate for drag")
 		}
-	case "double_click":
-		coords, ok := inputMap["coordinate"].([]any)
-		if ok && len(coords) >= 2 {
-			x := int(coords[0].(float64))
-			y := int(coords[1].(float64))
-			x, y = a.computerTool.ScaleCoordinates(tools.ScalingSourceAPI, x, y)
-			if err = a.computerTool.Move(ctx, x, y); err != nil {
-				return "", "", err
-			}
-		}
-
-		err = a.computerTool.Click(ctx, "left")
 		if err == nil {
-			time.Sleep(50 * time.Millisecond)
 			err = a.computerTool.Click(ctx, "left")
 		}
-	case "wait":
-		duration := time.Duration(3 * time.Second) // default to 3s if not provided / parseable
-		if d, ok := inputMap["duration"].(float64); ok {
-			duration = time.Duration(d * float64(time.Second))
-		}
-		time.Sleep(duration)
-	case "screenshot":
-		// TODO: the artifacts dir
-		b64, screenErr := a.computerTool.Screenshot(ctx, "/tmp")
-		return "", b64, screenErr
-	case "scroll":
-		coords, ok := inputMap["coordinate"].([]any)
-		var x, y *int
-		if ok && len(coords) >= 2 {
-			xVal := int(coords[0].(float64))
-			yVal := int(coords[1].(float64))
-			xVal, yVal = a.computerTool.ScaleCoordinates(tools.ScalingSourceAPI, xVal, yVal)
-			x = &xVal
-			y = &yVal
-		}
-		direction, ok := inputMap["scroll_direction"].(string)
-		if !ok || direction == "" {
-			direction = "down"
-		}
-		amount := 3
-		if amt, ok := inputMap["amount"].(float64); ok {
-			amount = int(amt)
-		}
-
-		err = a.computerTool.Scroll(ctx, direction, amount, x, y)
-	default:
-		return "", "", fmt.Errorf("unsupported action: %s", action)
-	}
-
-	if err != nil {
-		return "", "", err
-	}
-
-	b64, err := a.computerTool.Screenshot(ctx, "/tmp")
-	if err != nil {
-		return "", "", fmt.Errorf("error taking screenshot after action: %w", err)
-	}
-	return "", b64, nil
-}
-
-func maybeFilterImages(messages []anthropic.Message) {
-	imageCount := 0
-
-	// Iterate backwards over messages
-	for i := len(messages) - 1; i >= 0; i-- {
-		msg := &messages[i]
-
-		// For tool_results inside user messages:
-		for j := len(msg.Content) - 1; j >= 0; j-- {
-			block := &msg.Content[j]
-
-			if block.Type == "tool_result" {
-				// Content can be []ContentBlock. We need type assertion if it is "any".
-				// Oh, in our anthropic models, Content in tool_result is `any`. In our agent, we set it to `[]ContentBlock`.
-				blocks, ok := block.Content.([]anthropic.ContentBlock)
-				if !ok {
-					continue
-				}
-
-				// Collect indices of images to remove
-				var keepBlocks []anthropic.ContentBlock
-
-				// Iterate backwards over inner blocks
-				for k := len(blocks) - 1; k >= 0; k-- {
-					inner := blocks[k]
-					if inner.Type == "image" {
-						imageCount++
-						if imageCount <= MaxImagesInContext {
-							keepBlocks = append([]anthropic.ContentBlock{inner}, keepBlocks...)
-						}
-					} else {
-						keepBlocks = append([]anthropic.ContentBlock{inner}, keepBlocks...)
-					}
-				}
-
-				block.Content = keepBlocks
+	case cua.ActionDoubleClick, cua.ActionTripleClick:
+		if action.HasCoordinate {
+			x, y := a.computerTool.ScaleCoordinates(tools.ScalingSourceAPI, *action.X, *action.Y)
+			if err = a.computerTool.Move(ctx, x, y); err != nil {
+				return "", err
 			}
 		}
+
+		clicks := 2
+		if action.Type == cua.ActionTripleClick {
+			clicks = 3
+		}
+
+		for i := 0; i < clicks; i++ {
+			err = a.computerTool.Click(ctx, "left")
+			if err != nil {
+				break
+			}
+			if i < clicks-1 {
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	case cua.ActionScreenshot, cua.ActionWait:
+		// Do nothing, the next iteration will take a screenshot anyway
+		return "", nil
+	case cua.ActionScroll:
+		var xPtr, yPtr *int
+		if action.X != nil || action.Y != nil {
+			xVal, yVal := 0, 0
+			if action.X != nil {
+				xVal = *action.X
+			}
+			if action.Y != nil {
+				yVal = *action.Y
+			}
+			scaledX, scaledY := a.computerTool.ScaleCoordinates(tools.ScalingSourceAPI, xVal, yVal)
+			xPtr = &scaledX
+			yPtr = &scaledY
+		}
+		direction := "down" // Default interpretation, maybe handled better later if needed
+		amount := 3
+		err = a.computerTool.Scroll(ctx, direction, amount, xPtr, yPtr)
+	case cua.ActionCursorPosition:
+		var x, y int
+		x, y, err = a.computerTool.CursorPosition(ctx)
+		if err == nil {
+			// Save back to assistant text for LLM visibility
+			// Note: this happens automatically outside this func based on action parsing,
+			// but we can augment the result later.
+			action.X = &x
+			action.Y = &y
+		}
+	case cua.ActionLeftMouseDown:
+		err = a.computerTool.MouseDown(ctx, "left")
+	case cua.ActionLeftMouseUp:
+		err = a.computerTool.MouseUp(ctx, "left")
+	case cua.ActionLeftClickDrag:
+		if action.HasCoordinate {
+			x, y := a.computerTool.ScaleCoordinates(tools.ScalingSourceAPI, *action.X, *action.Y)
+			err = a.computerTool.MouseDown(ctx, "left")
+			if err == nil {
+				err = a.computerTool.Move(ctx, x, y)
+			}
+			if err == nil {
+				err = a.computerTool.MouseUp(ctx, "left")
+			}
+		} else {
+			return "", fmt.Errorf("coordinate is required for left_click_drag")
+		}
+	case cua.ActionHoldKey:
+		if action.Text == "" {
+			return "", fmt.Errorf("text is required for hold_key")
+		}
+		err = a.computerTool.HoldKey(ctx, action.Text, action.Duration)
+	case cua.ActionZoom:
+		if len(action.ZoomRegion) != 4 {
+			return "", fmt.Errorf("zoom requires ZoomRegion with 4 elements [x0, y0, x1, y1]")
+		}
+		zoomedImg, err = a.computerTool.Zoom(ctx, action.ZoomRegion[0], action.ZoomRegion[1], action.ZoomRegion[2], action.ZoomRegion[3])
+	default:
+		return "", fmt.Errorf("unsupported action: %s", action.Type)
 	}
+
+	return zoomedImg, err
 }

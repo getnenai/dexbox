@@ -89,6 +89,7 @@ _log_handler.setFormatter(_JSONLFormatter())
 logging.root.addHandler(_log_handler)
 logging.root.setLevel(logging.INFO)
 logging.captureWarnings(True)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class _PrintStream:
@@ -381,14 +382,14 @@ try:
         )
         try:
             import io
-            import tarfile as _tarfile
+            import zipfile as _zipfile
             from pathlib import Path as _ArchivePath
 
             _root = _ArchivePath("/assets")
             _internal_dir = _root / ".dexbox"
-            _tar_buf = io.BytesIO()
+            _zip_buf = io.BytesIO()
             _archived_files = []
-            with _tarfile.open(fileobj=_tar_buf, mode="w") as _tf:
+            with _zipfile.ZipFile(_zip_buf, mode="w", compression=_zipfile.ZIP_DEFLATED) as _zf:
                 for _p in sorted(_root.rglob("*")):
                     try:
                         if _internal_dir in _p.parents or _p == _internal_dir:
@@ -398,7 +399,7 @@ try:
                         if not _p.is_file():
                             continue
                         _arcname = str(_ArchivePath("assets") / _p.relative_to(_root))
-                        _tf.add(str(_p), arcname=_arcname)
+                        _zf.write(str(_p), arcname=_arcname)
                         _archived_files.append(_arcname)
                     except Exception as _add_err:
                         logging.warning(
@@ -409,7 +410,7 @@ try:
                         )
                         continue
 
-            _tar_bytes = _tar_buf.getvalue()
+            _zip_bytes = _zip_buf.getvalue()
             if not _archived_files:
                 logging.warning(
                     "Assets archive skipped: no files archived despite %d top-level entries",
@@ -420,24 +421,24 @@ try:
                 logging.info(
                     "Uploading assets archive: %d file(s), %d bytes",
                     len(_archived_files),
-                    len(_tar_bytes),
+                    len(_zip_bytes),
                     extra={
                         "event_type": "assets_archive_upload",
                         "file_count": len(_archived_files),
-                        "tar_size_bytes": len(_tar_bytes),
+                        "zip_size_bytes": len(_zip_bytes),
                         "files": _archived_files[:50],
                     },
                 )
                 _archive_resp = httpx.post(
                     f"{_parent_url}/internal/workflow/assets",
                     headers={"X-Session-Token": _session_token},
-                    content=_tar_bytes,
+                    content=_zip_bytes,
                     timeout=30.0,
                 )
                 _archive_resp.raise_for_status()
                 logging.info(
                     "Assets archive uploaded successfully (%d bytes, %d files)",
-                    len(_tar_bytes),
+                    len(_zip_bytes),
                     len(_archived_files),
                     extra={"event_type": "assets_archived", "file_count": len(_archived_files)},
                 )

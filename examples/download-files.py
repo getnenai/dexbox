@@ -24,8 +24,14 @@ def run(params: Params) -> Result:
     mount = Computer().drive(save_path)
 
     agent.execute(f"Open web browser to {url}. Save the file to {save_path}")
-    for f in mount.files():
-        Path(f.name).write_bytes(f.read_bytes())
-        break
+
+    files = list(mount.files())
+    if not files:
+        raise RuntimeError("File was not downloaded.")
+
+    f = files[0]
+    Path(f.name).write_bytes(f.read_bytes())
+    if not Path(f.name).exists():
+        raise RuntimeError("File was not downloaded.")
 
     return Result()

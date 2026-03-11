@@ -100,6 +100,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
+COPY pkg/ pkg/
 RUN CGO_ENABLED=0 go build -o /usr/local/bin/dexbox ./cmd/dexbox
 
 # ============================================================================

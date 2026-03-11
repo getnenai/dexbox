@@ -31,4 +31,8 @@ def run(params: Params) -> Result:
         schema=Result.model_json_schema(),
     )
 
-    return Result.model_construct(**data)
+    result = Result.model_construct(**data)
+    if len(result.stories) != 5:
+        raise ValueError("Expected 5 stories, got {}".format(len(result.stories)))
+
+    return result

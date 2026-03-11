@@ -41,6 +41,7 @@ class Agent:
         instruction: str,
         *,
         max_iterations: int = 25,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Execute a computer-use action sequence.
 
@@ -58,8 +59,10 @@ class Agent:
             "instruction": instruction,
             "max_iterations": max_iterations,
         }
-        if self._model_override:
-            payload["model_override"] = self._model_override
+
+        effective_model = model or self._model_override
+        if effective_model:
+            payload["model_override"] = effective_model
 
         result = call("/internal/workflow/execute", json=payload)
         if not result.get("success"):
@@ -71,6 +74,7 @@ class Agent:
         question: str,
         *,
         timeout: int = 10,
+        model: str | None = None,
     ) -> bool:
         """Check a visual condition on the screen.
 
@@ -88,8 +92,10 @@ class Agent:
             "question": question,
             "timeout": timeout,
         }
-        if self._model_override:
-            payload["model_override"] = self._model_override
+
+        effective_model = model or self._model_override
+        if effective_model:
+            payload["model_override"] = effective_model
 
         result = call("/internal/workflow/validate", json=payload)
         if not result.get("success"):
@@ -100,6 +106,8 @@ class Agent:
         self,
         query: str,
         schema: dict[str, Any],
+        *,
+        model: str | None = None,
     ) -> Any:
         """Extract structured data from the current screen.
 
@@ -118,8 +126,10 @@ class Agent:
             "query": query,
             "schema_def": schema,
         }
-        if self._model_override:
-            payload["model_override"] = self._model_override
+
+        effective_model = model or self._model_override
+        if effective_model:
+            payload["model_override"] = effective_model
 
         result = call("/internal/workflow/extract", json=payload)
         if not result.get("success"):
