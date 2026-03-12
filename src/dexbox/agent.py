@@ -3,7 +3,7 @@
 The Agent class provides three primary methods:
 
 - ``execute(instruction)`` — perform a computer-use action sequence
-- ``verify(question)``     — check a visual condition (returns bool)
+- ``verify(condition)``    — check a visual condition (returns bool)
 - ``extract(query, schema)``— extract structured data from the screen
 """
 
@@ -71,7 +71,7 @@ class Agent:
 
     def verify(
         self,
-        question: str,
+        condition: str,
         *,
         timeout: int = 10,
         model: str | None = None,
@@ -79,7 +79,7 @@ class Agent:
         """Check a visual condition on the screen.
 
         Args:
-            question: Yes/no question about the current screen state.
+            condition: Yes/no question about the current screen state.
             timeout: Max seconds to wait for the VLM response.
 
         Returns:
@@ -89,7 +89,7 @@ class Agent:
             RuntimeError: If the verification fails.
         """
         payload: dict[str, Any] = {
-            "question": question,
+            "question": condition,
             "timeout": timeout,
         }
 
