@@ -1,0 +1,1 @@
+../../.agents/rules/workflow-reference-detailed.mdc

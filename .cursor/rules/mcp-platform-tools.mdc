@@ -1,0 +1,1 @@
+../../.agents/rules/mcp-platform-tools.mdc
