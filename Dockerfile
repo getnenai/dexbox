@@ -76,7 +76,7 @@ RUN set -eux; \
     && ln -s /usr/bin/xfreerdp3 /usr/bin/xfreerdp
 
 # Clone noVNC
-RUN git clone --depth 1 --branch v1.6.0 https://github.com/novnc/noVNC.git /opt/noVNC && \
+RUN git clone --depth 1 --branch v1.5.0 https://github.com/novnc/noVNC.git /opt/noVNC && \
     git clone --depth 1 --branch v0.13.0 https://github.com/novnc/websockify /opt/noVNC/utils/websockify && \
     ln -s /opt/noVNC/vnc.html /opt/noVNC/index.html
 
