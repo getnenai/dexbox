@@ -16,13 +16,17 @@ type VMStatus struct {
 // Manager orchestrates VM lifecycle and SOAP connections.
 type Manager struct {
 	soapEndpoint string
+	soapUser     string
+	soapPass     string
 	sessions     map[string]*SOAPClient // vmName → active SOAP client
 }
 
 // NewManager creates a VM manager.
-func NewManager(soapEndpoint string) *Manager {
+func NewManager(soapEndpoint, user, pass string) *Manager {
 	return &Manager{
 		soapEndpoint: soapEndpoint,
+		soapUser:     user,
+		soapPass:     pass,
 		sessions:     make(map[string]*SOAPClient),
 	}
 }
@@ -203,7 +207,7 @@ func (m *Manager) ConnectSOAP(ctx context.Context, vmName string) error {
 		return nil // Already connected
 	}
 	soap := NewSOAPClient(m.soapEndpoint)
-	if err := soap.Connect(vmName, "", ""); err != nil {
+	if err := soap.Connect(vmName, m.soapUser, m.soapPass); err != nil {
 		return err
 	}
 	m.sessions[vmName] = soap

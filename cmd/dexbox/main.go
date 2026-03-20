@@ -242,7 +242,7 @@ dexbox auto-detects the VM. Auto-detection fails when multiple VMs exist.`,
 			Short: "List all VMs",
 			RunE: func(cmd *cobra.Command, args []string) error {
 				ctx := context.Background()
-				mgr := vbox.NewManager(config.SOAPAddr)
+				mgr := vbox.NewManager(config.SOAPAddr, config.VMUser, config.VMPass)
 				vms, err := mgr.List(ctx)
 				if err != nil {
 					return err
@@ -304,7 +304,7 @@ func vmAction(use, short string, fn func(context.Context, *vbox.Manager, string)
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
-			mgr := vbox.NewManager(config.SOAPAddr)
+			mgr := vbox.NewManager(config.SOAPAddr, config.VMUser, config.VMPass)
 
 			name, err := resolveVMName(ctx, args)
 			if err != nil {
@@ -386,7 +386,7 @@ Examples:
   dexbox run --type text_editor --command view --path 'C:\Users\dexbox\file.txt'`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
-			mgr := vbox.NewManager(config.SOAPAddr)
+			mgr := vbox.NewManager(config.SOAPAddr, config.VMUser, config.VMPass)
 
 			name := vmName
 			if name == "" {

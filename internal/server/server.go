@@ -42,7 +42,7 @@ type Options struct {
 // New creates a new tool server.
 func New(opts Options) *Server {
 	return &Server{
-		manager:   vbox.NewManager(opts.SOAPAddr),
+		manager:   vbox.NewManager(opts.SOAPAddr, opts.VMUser, opts.VMPass),
 		listen:    opts.ListenAddr,
 		vmUser:    opts.VMUser,
 		vmPass:    opts.VMPass,
