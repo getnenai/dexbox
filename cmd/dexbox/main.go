@@ -2,67 +2,59 @@
 //
 // Commands:
 //
-//	dexbox start    — Start the desktop container (docker compose up)
-//	dexbox stop     — Stop the desktop container  (docker compose down)
-//	dexbox run      — Run a workflow script
-//	dexbox logs     — Tail container logs
-//	dexbox status   — Show container / workflow status
+//	dexbox start        — Start dexbox server + vboxwebsrv daemon
+//	dexbox stop         — Stop dexbox server + vboxwebsrv
+//	dexbox status       — Server health + list of VMs
+//	dexbox create vm    — Install VirtualBox + create and provision a VM
+//	dexbox vm ...       — VM lifecycle commands
+//	dexbox run ...      — Execute tool actions directly
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
+	"os/signal"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/cenkalti/backoff/v5"
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
-	"github.com/tidwall/gjson"
 
-	"github.com/getnenai/dexbox/internal/logger"
+	"github.com/getnenai/dexbox/internal/config"
+	"github.com/getnenai/dexbox/internal/server"
+	"github.com/getnenai/dexbox/internal/vbox"
 )
-
-const (
-	defaultHost    = "http://localhost:8600"
-	healthEndpoint = "/health"
-	runEndpoint    = "/run"
-	cancelEndpoint = "/cancel"
-	statusEndpoint = "/status"
-	logsService    = "desktop"
-)
-
-// dexboxHost is the base URL of the dexbox service.
-// Tests may override this to point at an httptest.Server.
-var dexboxHost = defaultHost
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
 
 func main() {
 	var envFile string
 
 	root := &cobra.Command{
 		Use:   "dexbox",
-		Short: "dexbox — run computer-use workflows locally",
+		Short: "dexbox — VirtualBox-based computer-use tool server",
+		Long: `dexbox is a VirtualBox-based computer-use tool server.
+
+It manages Windows VMs and exposes an HTTP API for computer-use actions
+(screenshots, mouse, keyboard, file operations) used by AI workflows.
+
+Environment variables (or .env file):
+  DEXBOX_VM_USER           Guest OS username (default: dexbox)
+  DEXBOX_VM_PASS           Guest OS password (default: dexbox123)
+  DEXBOX_SOAP_ADDR         VirtualBox SOAP endpoint (default: http://localhost:18083)
+  DEXBOX_SHARED_DIR        Host/guest shared folder (default: ~/.dexbox/shared)
+  DEXBOX_LISTEN            Server listen address (default: :8600)
+  DEXBOX_SCREENSHOT_WIDTH  Screenshot width in pixels (default: 1024)
+  DEXBOX_SCREENSHOT_HEIGHT Screenshot height in pixels (default: 768)`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if envFile != "" {
 				if err := godotenv.Load(envFile); err != nil {
 					return fmt.Errorf("loading env file %s: %w", envFile, err)
 				}
 			} else {
-				// Load .env file if it exists, but don't fail if it's missing
 				_ = godotenv.Load()
 			}
 			return nil
@@ -71,7 +63,7 @@ func main() {
 
 	root.PersistentFlags().StringVarP(&envFile, "env-file", "e", "", "Path to .env file")
 
-	root.AddCommand(cmdStart(), cmdStop(), cmdCancel(), cmdRun(), cmdLogs(), cmdStatus(), cmdServer())
+	root.AddCommand(cmdStart(), cmdStop(), cmdStatus(), cmdCreate(), cmdVM(), cmdRunAction())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -83,28 +75,55 @@ func main() {
 // ---------------------------------------------------------------------------
 
 func cmdStart() *cobra.Command {
-	var wait bool
-	var debug bool
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "start",
-		Short: "Start the dexbox container",
+		Short: "Start dexbox server and vboxwebsrv",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if debug {
-				os.Setenv("DEXBOX_LOG_LEVEL", "DEBUG")
+			// Start vboxwebsrv in background
+			fmt.Println("Starting vboxwebsrv...")
+			vboxwebsrv := exec.Command("vboxwebsrv", "--background", "--host", "localhost", "--port", "18083")
+			vboxwebsrv.Stdout = os.Stdout
+			vboxwebsrv.Stderr = os.Stderr
+			if err := vboxwebsrv.Start(); err != nil {
+				return fmt.Errorf("failed to start vboxwebsrv: %w", err)
 			}
-			fmt.Println("Starting dexbox…")
-			if err := dockerCompose("up", "-d"); err != nil {
+
+			// Give it a moment to bind
+			time.Sleep(1 * time.Second)
+
+			fmt.Println("Starting dexbox server...")
+			srv := server.New(server.Options{
+				ListenAddr: config.Listen,
+				SOAPAddr:   config.SOAPAddr,
+				VMUser:     config.VMUser,
+				VMPass:     config.VMPass,
+				Width:      config.ScreenshotWidth,
+				Height:     config.ScreenshotHeight,
+				SharedDir:  config.SharedDir,
+			})
+
+			// Handle shutdown signals
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- srv.Run()
+			}()
+
+			select {
+			case err := <-errCh:
 				return err
+			case <-ctx.Done():
+				fmt.Println("\nShutting down...")
+				// Kill vboxwebsrv
+				if vboxwebsrv.Process != nil {
+					_ = vboxwebsrv.Process.Kill()
+				}
+				return nil
 			}
-			if wait {
-				return waitReady(60 * time.Second)
-			}
-			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&wait, "wait", true, "Wait until service is healthy before returning")
-	cmd.Flags().BoolVar(&debug, "debug", false, "Enable debug logging in the container")
-	return cmd
 }
 
 // ---------------------------------------------------------------------------
@@ -114,232 +133,15 @@ func cmdStart() *cobra.Command {
 func cmdStop() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
-		Short: "Stop the dexbox container",
+		Short: "Stop dexbox server and vboxwebsrv",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("Stopping dexbox…")
-			return dockerCompose("down")
-		},
-	}
-}
-
-// ---------------------------------------------------------------------------
-// dexbox cancel
-// ---------------------------------------------------------------------------
-
-func cmdCancel() *cobra.Command {
-	return &cobra.Command{
-		Use:   "cancel",
-		Short: "Cancel the currently-running workflow",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := http.Post(dexboxHost+cancelEndpoint, "application/json", nil) //nolint:noctx
-			if err != nil {
-				return fmt.Errorf("could not reach service: %w", err)
-			}
-			defer resp.Body.Close()
-
-			switch resp.StatusCode {
-			case http.StatusOK:
-				fmt.Println("✓  Workflow cancelled")
-			case http.StatusNotFound:
-				fmt.Println("ℹ  No workflow is currently running")
-			default:
-				body, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("cancel failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
-			}
+			fmt.Println("Stopping vboxwebsrv...")
+			// Kill vboxwebsrv by name
+			_ = exec.Command("pkill", "-f", "vboxwebsrv").Run()
+			fmt.Println("Stopped.")
 			return nil
 		},
 	}
-}
-
-// ---------------------------------------------------------------------------
-// dexbox run
-// ---------------------------------------------------------------------------
-
-func cmdRun() *cobra.Command {
-	var (
-		paramsStr        string
-		secureParamsStr  string
-		artifactsDir     string
-		timeout          int
-		model            string
-		anthropicBaseURL string
-		openaiBaseURL    string
-		noBrowser        bool
-		provider         string
-	)
-
-	cmd := &cobra.Command{
-		Use:   "run <workflow.py>",
-		Short: "Run a workflow script",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			scriptPath := args[0]
-			script, err := os.ReadFile(scriptPath)
-			if err != nil {
-				return fmt.Errorf("reading script: %w", err)
-			}
-
-			// Parse --params from JSON string
-			variables := make(map[string]interface{})
-			if paramsStr != "" {
-				if err := json.Unmarshal([]byte(paramsStr), &variables); err != nil {
-					cmd.SilenceUsage = true
-					return fmt.Errorf("parsing params JSON: %w", err)
-				}
-			}
-
-			// Parse --secure-params from JSON string
-			secureParams := make(map[string]string)
-			if secureParamsStr != "" {
-				if err := json.Unmarshal([]byte(secureParamsStr), &secureParams); err != nil {
-					cmd.SilenceUsage = true
-					return fmt.Errorf("parsing secure params JSON: %w", err)
-				}
-			}
-
-			// Gather ALL API keys. We still grab the "primary" key for backwards compatibility,
-			// but the new way injects all so the model override can switch backends dynamically.
-			anthropicAPIKey := os.Getenv("ANTHROPIC_API_KEY")
-			openAIAPIKey := os.Getenv("OPENAI_API_KEY")
-
-			if model == "" {
-				model = os.Getenv("DEXBOX_MODEL")
-				if model == "" {
-					model = "claude-opus-4-6"
-				}
-			}
-
-			if openaiBaseURL == "" {
-				openaiBaseURL = os.Getenv("OPENAI_BASE_URL")
-			}
-
-			// If provider wasn't passed, try to guess from the model, or fallback to anthropic
-			inferredProvider := provider
-			if inferredProvider == "" {
-				lowerModel := strings.ToLower(model)
-				if strings.HasPrefix(lowerModel, "gpt-") || strings.HasPrefix(lowerModel, "o1") || strings.HasPrefix(lowerModel, "o3") {
-					inferredProvider = "openai"
-				} else {
-					inferredProvider = "anthropic"
-				}
-			}
-
-			var primaryAPIKey string
-			switch inferredProvider {
-			case "openai":
-				primaryAPIKey = openAIAPIKey
-				if primaryAPIKey == "" {
-					return fmt.Errorf("OPENAI_API_KEY environment variable is required when using openai provider")
-				}
-				if model == "" {
-					model = os.Getenv("DEXBOX_MODEL")
-					if model == "" {
-						model = "gpt-4.5-preview"
-					}
-				}
-			default:
-				primaryAPIKey = anthropicAPIKey
-				if primaryAPIKey == "" {
-					return fmt.Errorf("ANTHROPIC_API_KEY environment variable is required for anthropic/default provider")
-				}
-			}
-
-			workflowID := filepath.Base(scriptPath)
-
-			payload := map[string]interface{}{
-				"script":            string(script),
-				"api_key":           primaryAPIKey,
-				"anthropic_api_key": anthropicAPIKey,
-				"openai_api_key":    openAIAPIKey,
-				"model":             model,
-				"provider":          inferredProvider,
-				"workflow_id":       workflowID,
-				"variables":         variables,
-				"secure_params":     secureParams,
-			}
-			if anthropicBaseURL != "" {
-				payload["anthropic_base_url"] = anthropicBaseURL
-			}
-			if openaiBaseURL != "" {
-				payload["openai_base_url"] = openaiBaseURL
-			}
-
-			body, err := json.Marshal(payload)
-			if err != nil {
-				return err
-			}
-
-			client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
-			resp, err := client.Post(dexboxHost+runEndpoint, "application/json", bytes.NewReader(body))
-			if err != nil {
-				return fmt.Errorf("connecting to dexbox: %w\n(Is it running? Try: dexbox start)", err)
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode == 429 {
-				return fmt.Errorf("a workflow is already running (try: dexbox cancel)")
-			}
-			if resp.StatusCode != 200 {
-				b, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("server error %d: %s", resp.StatusCode, b)
-			}
-
-			streamURL := "http://localhost:6080/vnc_lite.html"
-			fmt.Fprintf(os.Stdout, "▶  Live dexbox stream available at: %s\n", streamURL)
-			if !noBrowser {
-				_ = openBrowser(streamURL)
-			}
-
-			// Stream NDJSON output
-			code, err := streamRun(resp.Body, workflowID, os.Stdout, os.Stderr)
-			if code != 0 {
-				os.Exit(code)
-			}
-
-			// Copy artifacts if requested
-			if artifactsDir != "" {
-				fmt.Printf("Artifacts saved to: %s\n", artifactsDir)
-			}
-
-			return err
-		},
-	}
-
-	cmd.Flags().StringVar(&paramsStr, "params", "", "Workflow parameters as JSON string (e.g. --params '{\"foo\":\"bar\"}')")
-	cmd.Flags().StringVar(&secureParamsStr, "secure-params", "", "Sensitive parameters as JSON string (e.g. --secure-params '{\"token\":\"sekret\"}')")
-	cmd.Flags().StringVar(&artifactsDir, "artifacts", "", "Directory to save workflow artifacts")
-	cmd.Flags().IntVar(&timeout, "timeout", 600, "Workflow timeout in seconds")
-	cmd.Flags().StringVar(&model, "model", "", "LLM model override")
-	cmd.Flags().StringVar(&provider, "provider", "", "Provider to use (anthropic, openai)")
-	cmd.Flags().StringVar(&anthropicBaseURL, "anthropic-base-url", "", "Override the base URL for Anthropic API requests")
-	cmd.Flags().StringVar(&openaiBaseURL, "openai-base-url", "", "Override the base URL for OpenAI API requests")
-	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "Do not launch the browser for the dexbox stream")
-	return cmd
-}
-
-// ---------------------------------------------------------------------------
-// dexbox logs
-// ---------------------------------------------------------------------------
-
-func cmdLogs() *cobra.Command {
-	var follow bool
-	cmd := &cobra.Command{
-		Use:   "logs",
-		Short: "Show container logs",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			dargs := []string{"compose", "logs"}
-			if follow {
-				dargs = append(dargs, "-f")
-			}
-			dargs = append(dargs, logsService)
-			c := exec.Command("docker", dargs...)
-			c.Stdout = os.Stdout
-			c.Stderr = os.Stderr
-			return c.Run()
-		},
-	}
-	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output")
-	return cmd
 }
 
 // ---------------------------------------------------------------------------
@@ -349,245 +151,401 @@ func cmdLogs() *cobra.Command {
 func cmdStatus() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show service and workflow status",
+		Short: "Show server health and VM states",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := http.Get(dexboxHost + statusEndpoint)
+			ctx := context.Background()
+
+			// List VMs
+			vms, err := vbox.ListVMs(ctx)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "dexbox not reachable: %v\n", err)
-				fmt.Println("Status: STOPPED")
+				fmt.Printf("VirtualBox: not available (%v)\n", err)
 				return nil
 			}
-			defer resp.Body.Close()
-			var status map[string]interface{}
-			if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-				return err
+
+			if len(vms) == 0 {
+				fmt.Println("No VMs found. Run 'dexbox create vm <name> --iso <path>' to create one.")
+				return nil
 			}
-			running, _ := status["running"].(bool)
-			if running {
-				wid, _ := status["workflow_id"].(string)
-				fmt.Printf("Status: RUNNING  (workflow: %s)\n", wid)
-			} else {
-				fmt.Println("Status: IDLE")
+
+			fmt.Printf("%-20s %-12s %s\n", "NAME", "STATE", "GUEST ADDITIONS")
+			for _, name := range vms {
+				state, _ := vbox.VMState(ctx, name)
+				ga := vbox.GuestAdditionsReady(ctx, name)
+				gaStr := "no"
+				if ga {
+					gaStr = "yes"
+				}
+				fmt.Printf("%-20s %-12s %s\n", name, state, gaStr)
 			}
-			uptime, _ := status["uptime_seconds"].(float64)
-			fmt.Printf("Uptime: %.0fs\n", uptime)
 			return nil
 		},
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// dexbox create
 // ---------------------------------------------------------------------------
 
-func dockerCompose(args ...string) error {
-	dargs := append([]string{"compose"}, args...)
-	c := exec.Command("docker", dargs...)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	return c.Run()
+func cmdCreate() *cobra.Command {
+	create := &cobra.Command{
+		Use:   "create",
+		Short: "Create dexbox-managed resources",
+	}
+	create.AddCommand(cmdCreateVM())
+	return create
 }
 
-// streamRun reads a newline-delimited JSON event stream from r and writes
-// human-readable progress to stdout/stderr.
-// It returns (exitCode, scannerError). exitCode is 1 when the server signals
-// a workflow failure or error event.
-func streamRun(r io.Reader, workflowID string, stdout, stderr io.Writer) (int, error) {
-	scanner := bufio.NewScanner(r)
-	// Increase buffer size to 10 MB to handle large VLM responses with images.
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 10*1024*1024)
+func cmdCreateVM() *cobra.Command {
+	var isoPath string
+	c := &cobra.Command{
+		Use:   "vm <name>",
+		Short: "Install VirtualBox and provision a new Windows VM",
+		Long: `Install VirtualBox (if needed), then create and provision a Windows 11 VM.
 
-	var downloadedAssets []string
+The VM name is used as the VirtualBox machine name and must be unique.
+On ARM hosts the --iso flag is required; on x86 the ISO is auto-downloaded.
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		if !gjson.Valid(line) {
-			fmt.Fprintln(stdout, line)
-			continue
-		}
-		e := gjson.Parse(line)
-		switch e.Get("type").String() {
-		case "started":
-			fmt.Fprintf(stdout, "▶  Workflow started: %s\n", workflowID)
-		case "progress":
-			switch e.Get("data.type").String() {
-			case "text":
-				if text := strings.TrimSpace(e.Get("data.data").String()); text != "" {
-					// Use JSON structure matching standard logs so it passes RenderLogLine cleanly
-					logStr := fmt.Sprintf(`{"time":"%s", "level":"INFO", "name":"dexbox.agent", "message":%q}`, time.Now().Format(time.RFC3339Nano), "Agent thought: "+text)
-					if formatted := logger.RenderLogLine(logStr); formatted != "" {
-						fmt.Fprintln(stdout, formatted)
-					}
-				}
-			case "tool_call":
-				name := e.Get("data.data.name").String()
-				inputRaw := e.Get("data.data.input").Raw
+Example:
+  dexbox create vm desktop-1 --iso ~/Downloads/Win11_25H2_English_Arm64.iso`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			expandedISO := isoPath
+			if isoPath != "" && len(isoPath) > 1 && isoPath[0] == '~' {
+				home, _ := os.UserHomeDir()
+				expandedISO = home + isoPath[1:]
+			}
+			return vbox.Install(context.Background(), name, expandedISO)
+		},
+	}
+	c.Flags().StringVar(&isoPath, "iso", "", "Path to Windows ISO (required on ARM; auto-downloaded on x86)")
+	return c
+}
 
-				callStr := formatToolCall(name, inputRaw)
-				msg := fmt.Sprintf("Executing %s", callStr)
+// ---------------------------------------------------------------------------
+// dexbox vm
+// ---------------------------------------------------------------------------
 
-				logStr := fmt.Sprintf(`{"time":"%s", "level":"INFO", "name":"dexbox.tool", "message":%q, "tool":%q}`,
-					time.Now().Format(time.RFC3339Nano), msg, name)
-				if formatted := logger.RenderLogLine(logStr); formatted != "" {
-					fmt.Fprintln(stdout, formatted)
-				}
-			case "tool_result":
-				name := e.Get("data.data.name").String()
-				if errMsg := e.Get("data.data.error").String(); errMsg != "" {
-					logStr := fmt.Sprintf(`{"time":"%s", "level":"WARN", "name":"dexbox.tool", "message":%q, "tool":%q}`,
-						time.Now().Format(time.RFC3339Nano), "Tool "+name+" failed: "+errMsg, name)
-					if formatted := logger.RenderLogLine(logStr); formatted != "" {
-						fmt.Fprintln(stdout, formatted)
-					}
-				} else {
-					logStr := fmt.Sprintf(`{"time":"%s", "level":"DEBUG", "name":"dexbox.tool", "message":%q, "tool":%q}`,
-						time.Now().Format(time.RFC3339Nano), "Tool "+name+" succeeded", name)
-					if formatted := logger.RenderLogLine(logStr); formatted != "" {
-						fmt.Fprintln(stdout, formatted)
-					}
-				}
-			case "log":
-				if logLine := e.Get("data.data").String(); logLine != "" {
-					if formatted := logger.RenderLogLine(logLine); formatted != "" {
-						fmt.Fprintln(stdout, formatted)
-					}
-				}
-			case "assets":
-				filename := e.Get("data.data.filename").String()
-				contentB64 := e.Get("data.data.content_b64").String()
-				if filename == "" || contentB64 == "" {
-					break
-				}
-				data, err := base64.StdEncoding.DecodeString(contentB64)
+func cmdVM() *cobra.Command {
+	vm := &cobra.Command{
+		Use:   "vm",
+		Short: "Manage VMs",
+		Long: `Manage VirtualBox VMs used by dexbox.
+
+If a command accepts an optional [name] argument and it is omitted,
+dexbox auto-detects the VM. Auto-detection fails when multiple VMs exist.`,
+	}
+
+	vm.AddCommand(
+		&cobra.Command{
+			Use:   "list",
+			Short: "List all VMs",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				ctx := context.Background()
+				mgr := vbox.NewManager(config.SOAPAddr)
+				vms, err := mgr.List(ctx)
 				if err != nil {
-					fmt.Fprintf(stderr, "✗  Failed to decode assets: %v\n", err)
-					break
+					return err
 				}
-				if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
-					fmt.Fprintf(stderr, "✗  Failed to create directory for %s: %v\n", filename, err)
-					break
+				if len(vms) == 0 {
+					fmt.Println("No VMs found.")
+					return nil
 				}
-				if err := os.WriteFile(filename, data, 0644); err != nil {
-					fmt.Fprintf(stderr, "✗  Failed to save %s: %v\n", filename, err)
-				} else {
-					downloadedAssets = append(downloadedAssets, filename)
-				}
-			}
-		case "result":
-			if e.Get("data.success").Bool() {
-				for _, asset := range downloadedAssets {
-					fmt.Fprintf(stdout, "ℹ  Assets saved to: ./%s\n", asset)
-				}
-				duration := e.Get("data.duration_ms").Int()
-				fmt.Fprintf(stdout, "✓  Workflow completed in %d ms\n", duration)
-
-				if assetsURL := e.Get("data.assets_url").String(); assetsURL != "" {
-					fmt.Fprintf(stdout, "🔗  Assets URL: %s\n", assetsURL)
-				}
-
-				if result := e.Get("data.result"); result.Exists() && result.Raw != "" {
-					fmt.Fprintln(stdout, result.Raw)
-				} else {
-					fmt.Fprintln(stdout, "(No result returned)")
-				}
-			} else {
-				fmt.Fprintf(stderr, "✗  Workflow failed: %s\n", e.Get("data.error").String())
-				return 1, nil
-			}
-		case "error":
-			fmt.Fprintf(stderr, "✗  Error: %s\n", e.Get("data.error").String())
-			return 1, nil
-		}
-	}
-	return 0, scanner.Err()
-}
-
-func waitReady(timeout time.Duration) error {
-	fmt.Print("Waiting for service to be ready")
-	client := &http.Client{Timeout: 2 * time.Second}
-	_, err := backoff.Retry(
-		context.Background(),
-		backoff.Operation[struct{}](func() (struct{}, error) {
-			resp, err := client.Get(dexboxHost + healthEndpoint)
-			if err != nil {
-				fmt.Print(".")
-				return struct{}{}, fmt.Errorf("not ready")
-			}
-			_, _ = io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				fmt.Println(" ✓")
-				return struct{}{}, nil
-			}
-			fmt.Print(".")
-			return struct{}{}, fmt.Errorf("not ready")
-		}),
-		backoff.WithMaxElapsedTime(timeout),
-	)
-	return err
-}
-
-var openBrowser = func(url string) error {
-	var err error
-	switch runtime.GOOS {
-	case "linux":
-		err = exec.Command("xdg-open", url).Start()
-	case "windows":
-		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
-	case "darwin":
-		err = exec.Command("open", url).Start()
-	default:
-		err = fmt.Errorf("unsupported platform")
-	}
-	return err
-}
-
-func formatToolCall(name string, inputRaw string) string {
-	var inputMap map[string]interface{}
-	if err := json.Unmarshal([]byte(inputRaw), &inputMap); err == nil {
-		if name == "computer" {
-			action, _ := inputMap["action"].(string)
-			switch action {
-			case "key":
-				text, _ := inputMap["text"].(string)
-				return fmt.Sprintf("key(%q)", text)
-			case "type":
-				text, _ := inputMap["text"].(string)
-				return fmt.Sprintf("type(%q)", text)
-			case "mouse_move":
-				coords, ok := inputMap["coordinate"].([]interface{})
-				if ok && len(coords) >= 2 {
-					return fmt.Sprintf("mouse_move(%v, %v)", coords[0], coords[1])
-				}
-				return "mouse_move(?, ?)"
-			case "left_click", "right_click", "middle_click", "double_click", "left_click_drag":
-				return fmt.Sprintf("%s()", action)
-			case "screenshot":
-				return "screenshot()"
-			default:
-				var args []string
-				for k, v := range inputMap {
-					if k != "action" {
-						args = append(args, fmt.Sprintf("%s=%v", k, v))
+				fmt.Printf("%-20s %-12s %s\n", "NAME", "STATE", "GUEST ADDITIONS")
+				for _, vm := range vms {
+					gaStr := "no"
+					if vm.GuestAdditions {
+						gaStr = "yes"
 					}
+					fmt.Printf("%-20s %-12s %s\n", vm.Name, vm.State, gaStr)
 				}
-				if len(args) > 0 {
-					return fmt.Sprintf("%s(%s)", action, strings.Join(args, ", "))
-				}
-				return fmt.Sprintf("%s()", action)
+				return nil
+			},
+		},
+		vmAction("start", "Start a VM", func(ctx context.Context, mgr *vbox.Manager, name string) error {
+			return mgr.Start(ctx, name)
+		}),
+		vmAction("stop", "Graceful ACPI shutdown", func(ctx context.Context, mgr *vbox.Manager, name string) error {
+			return mgr.Stop(ctx, name)
+		}),
+		vmAction("poweroff", "Immediately cut power (force stop)", func(ctx context.Context, mgr *vbox.Manager, name string) error {
+			return mgr.Poweroff(ctx, name)
+		}),
+		vmAction("pause", "Freeze VM in memory", func(ctx context.Context, mgr *vbox.Manager, name string) error {
+			return mgr.Pause(ctx, name)
+		}),
+		vmAction("suspend", "Save state to disk and power off", func(ctx context.Context, mgr *vbox.Manager, name string) error {
+			return mgr.Suspend(ctx, name)
+		}),
+		vmAction("resume", "Resume from pause or suspend", func(ctx context.Context, mgr *vbox.Manager, name string) error {
+			return mgr.Resume(ctx, name)
+		}),
+		vmAction("status", "Show VM state", func(ctx context.Context, mgr *vbox.Manager, name string) error {
+			status, err := mgr.Status(ctx, name)
+			if err != nil {
+				return err
 			}
-		} else {
-			// Generic formatting for other tools: tool(arg1=val1, ...)
-			var args []string
-			for k, v := range inputMap {
-				args = append(args, fmt.Sprintf("%s=%v", k, v))
+			b, _ := json.MarshalIndent(status, "", "  ")
+			fmt.Println(string(b))
+			return nil
+		}),
+		vmAction("destroy", "Delete VM and disk", func(ctx context.Context, mgr *vbox.Manager, name string) error {
+			return mgr.Delete(ctx, name)
+		}),
+	)
+
+	return vm
+}
+
+func vmAction(use, short string, fn func(context.Context, *vbox.Manager, string) error) *cobra.Command {
+	return &cobra.Command{
+		Use:   use + " [name]",
+		Short: short,
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			mgr := vbox.NewManager(config.SOAPAddr)
+
+			name, err := resolveVMName(ctx, args)
+			if err != nil {
+				return err
 			}
-			return fmt.Sprintf("%s(%s)", name, strings.Join(args, ", "))
-		}
+
+			return fn(ctx, mgr, name)
+		},
 	}
-	return fmt.Sprintf("%s(%s)", name, inputRaw)
+}
+
+// resolveVMName resolves the VM name from args or auto-detects it.
+func resolveVMName(ctx context.Context, args []string) (string, error) {
+	if len(args) > 0 {
+		return args[0], nil
+	}
+
+	vms, err := vbox.ListVMs(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(vms) == 0 {
+		return "", fmt.Errorf("no VMs found. Run 'dexbox create vm <name> --iso <path>' to create one")
+	}
+	if len(vms) > 1 {
+		return "", fmt.Errorf("multiple VMs found (%s), specify a name", strings.Join(vms, ", "))
+	}
+	return vms[0], nil
+}
+
+// ---------------------------------------------------------------------------
+// dexbox run
+// ---------------------------------------------------------------------------
+
+func cmdRunAction() *cobra.Command {
+	var (
+		toolType   string
+		action     string
+		coordinate string
+		text       string
+		command    string
+		path       string
+		fileText   string
+		oldStr     string
+		newStr     string
+		vmName     string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "run",
+		Short: "Execute a tool action directly",
+		Long: `Execute a low-level tool action against a VM.
+
+Tool types and their actions:
+
+  computer
+    screenshot               Capture the VM screen (outputs raw PNG to stdout)
+    left_click   --coordinate x,y
+    right_click  --coordinate x,y
+    middle_click --coordinate x,y
+    double_click --coordinate x,y
+    mouse_move   --coordinate x,y  Move cursor without clicking
+    scroll       --coordinate x,y  Scroll down at position
+    type         --text <string>    Type a string of text
+    key          --text <key>       Press a key (e.g. Return, ctrl+c)
+
+  bash
+    --command <ps1>   Run a PowerShell command on the guest and print output
+
+  text_editor
+    --command view    --path <guest-path>
+    --command create  --path <guest-path> --file-text <content>
+
+Examples:
+  dexbox run --type computer --action screenshot > screen.png
+  dexbox run --type computer --action left_click --coordinate 100,200
+  dexbox run --type computer --action type --text "hello world"
+  dexbox run --type bash --command "Get-Process"
+  dexbox run --type text_editor --command view --path 'C:\Users\dexbox\file.txt'`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			mgr := vbox.NewManager(config.SOAPAddr)
+
+			name := vmName
+			if name == "" {
+				var err error
+				name, err = resolveVMName(ctx, nil)
+				if err != nil {
+					return err
+				}
+			}
+
+			// Ensure SOAP is connected
+			if err := mgr.Start(ctx, name); err != nil {
+				return err
+			}
+
+			soap := mgr.SOAPClient(name)
+
+			switch toolType {
+			case "computer":
+				ct := newComputerToolForRun(name, soap)
+				return runComputerAction(ctx, ct, action, coordinate, text)
+			case "bash":
+				out, err := vbox.GuestRun(ctx, name, config.VMUser, config.VMPass,
+					"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+					"-NoProfile", "-NonInteractive", "-Command", command)
+				if err != nil {
+					return err
+				}
+				fmt.Print(out)
+				return nil
+			case "text_editor":
+				return runEditorAction(ctx, name, command, path, fileText, oldStr, newStr)
+			default:
+				return fmt.Errorf("unknown tool type %q (use: computer, bash, text_editor)", toolType)
+			}
+		},
+	}
+
+	cmd.Flags().StringVar(&toolType, "type", "", "Tool type: computer, bash, or text_editor (required)")
+	cmd.Flags().StringVar(&action, "action", "", "Computer action: screenshot, left_click, right_click, middle_click, double_click, mouse_move, scroll, type, key")
+	cmd.Flags().StringVar(&coordinate, "coordinate", "", "Mouse position as x,y (required for click/move/scroll actions)")
+	cmd.Flags().StringVar(&text, "text", "", "Text to type or key to press (required for type/key actions)")
+	cmd.Flags().StringVar(&command, "command", "", "PowerShell command (bash) or editor operation: view, create")
+	cmd.Flags().StringVar(&path, "path", "", "Guest file path (required for text_editor actions)")
+	cmd.Flags().StringVar(&fileText, "file-text", "", "File content to write (required for text_editor create)")
+	cmd.Flags().StringVar(&oldStr, "old-str", "", "String to replace (text_editor str_replace)")
+	cmd.Flags().StringVar(&newStr, "new-str", "", "Replacement string (text_editor str_replace)")
+	cmd.Flags().StringVar(&vmName, "vm", "", "VM name (auto-detected when only one VM exists)")
+	_ = cmd.MarkFlagRequired("type")
+
+	return cmd
+}
+
+func newComputerToolForRun(vmName string, soap *vbox.SOAPClient) *computerToolRunner {
+	return &computerToolRunner{vmName: vmName, soap: soap}
+}
+
+type computerToolRunner struct {
+	vmName string
+	soap   *vbox.SOAPClient
+}
+
+func runComputerAction(ctx context.Context, ct *computerToolRunner, action, coordinate, text string) error {
+	switch action {
+	case "screenshot":
+		data, err := vbox.Screenshot(ctx, ct.vmName)
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(data)
+		return err
+	case "left_click", "right_click", "middle_click", "double_click":
+		x, y, err := parseCoordinate(coordinate)
+		if err != nil {
+			return err
+		}
+		buttonMask := 1
+		switch action {
+		case "right_click":
+			buttonMask = 2
+		case "middle_click":
+			buttonMask = 4
+		}
+		if action == "double_click" {
+			return ct.soap.MouseDoubleClick(x, y, 1)
+		}
+		return ct.soap.MouseClick(x, y, buttonMask)
+	case "type":
+		codes := vbox.TextToScancodes(text)
+		return vbox.SendScancodes(ctx, ct.vmName, codes)
+	case "key":
+		codes := vbox.KeyToScancodes(text)
+		return vbox.SendScancodes(ctx, ct.vmName, codes)
+	case "mouse_move":
+		x, y, err := parseCoordinate(coordinate)
+		if err != nil {
+			return err
+		}
+		return ct.soap.MouseMoveAbsolute(x, y)
+	case "scroll":
+		x, y, err := parseCoordinate(coordinate)
+		if err != nil {
+			return err
+		}
+		return ct.soap.MouseScroll(x, y, -3)
+	default:
+		return fmt.Errorf("unknown computer action %q", action)
+	}
+}
+
+func runEditorAction(ctx context.Context, vmName, command, path, fileText, oldStr, newStr string) error {
+	switch command {
+	case "view":
+		out, err := vbox.GuestRun(ctx, vmName, config.VMUser, config.VMPass,
+			"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+			"-NoProfile", "-NonInteractive", "-Command",
+			fmt.Sprintf("Get-Content -Raw '%s'", path))
+		if err != nil {
+			return err
+		}
+		fmt.Print(out)
+		return nil
+	case "create":
+		tmpPath := fmt.Sprintf("%s/dexbox-tmp-%d.txt", config.SharedDir, os.Getpid())
+		if err := os.MkdirAll(config.SharedDir, 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(tmpPath, []byte(fileText), 0o644); err != nil {
+			return err
+		}
+		defer os.Remove(tmpPath)
+
+		guestShared := fmt.Sprintf("\\\\vboxsvr\\shared\\dexbox-tmp-%d.txt", os.Getpid())
+		_, err := vbox.GuestRun(ctx, vmName, config.VMUser, config.VMPass,
+			"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+			"-NoProfile", "-NonInteractive", "-Command",
+			fmt.Sprintf("Copy-Item '%s' '%s' -Force", guestShared, path))
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Created %s\n", path)
+		return nil
+	default:
+		return fmt.Errorf("unknown editor command %q", command)
+	}
+}
+
+func parseCoordinate(s string) (int, int, error) {
+	parts := strings.SplitN(s, ",", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("coordinate must be in format x,y (got %q)", s)
+	}
+	x, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid x coordinate: %w", err)
+	}
+	y, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid y coordinate: %w", err)
+	}
+	return x, y, nil
 }

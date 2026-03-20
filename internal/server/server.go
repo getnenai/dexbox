@@ -1,742 +1,530 @@
 package server
 
 import (
-	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/docker/docker/pkg/stdcopy"
-	"github.com/getnenai/dexbox/internal/agent"
-	"github.com/getnenai/dexbox/internal/anthropic"
-	"github.com/getnenai/dexbox/internal/openai"
-	"github.com/getnenai/dexbox/internal/sandbox"
 	"github.com/getnenai/dexbox/internal/tools"
-	"github.com/getnenai/dexbox/pkg/cua"
+	"github.com/getnenai/dexbox/internal/vbox"
 )
 
-type RunRequest struct {
-	Script           string            `json:"script"`
-	APIKey           string            `json:"api_key"`
-	AnthropicAPIKey  string            `json:"anthropic_api_key,omitempty"`
-	OpenAIAPIKey     string            `json:"openai_api_key,omitempty"`
-	LuxAPIKey        string            `json:"lux_api_key,omitempty"`
-	GeminiAPIKey     string            `json:"gemini_api_key,omitempty"`
-	Model            string            `json:"model"`
-	Provider         string            `json:"provider"`
-	AnthropicBaseURL string            `json:"anthropic_base_url,omitempty"`
-	Variables        map[string]any    `json:"variables,omitempty"`
-	SecureParams     map[string]string `json:"secure_params,omitempty"`
-	WorkflowID       string            `json:"workflow_id"`
-	RuntimeExtension string            `json:"runtime_extension"`
-	OpenAIBaseURL    string            `json:"openai_base_url,omitempty"`
+// Server is the dexbox tool server.
+type Server struct {
+	manager *vbox.Manager
+	listen  string
+	vmUser  string
+	vmPass  string
+	display tools.DisplayConfig
+	shared  string
+
+	// Per-VM tool instances (lazily created)
+	computers map[string]*tools.ComputerTool
+	bashes    map[string]*tools.BashTool
+	editors   map[string]*tools.EditorTool
 }
 
+// Options configures the tool server.
 type Options struct {
-	ListenAddr    string
-	OpenAIBaseURL string
+	ListenAddr string
+	SOAPAddr   string
+	VMUser     string
+	VMPass     string
+	Width      int
+	Height     int
+	SharedDir  string
 }
 
-var runLock sync.Mutex
-var orchestrator *sandbox.SandboxOrchestrator
-var sessionManager *SessionManager
-var computerTool *tools.ComputerTool
-
-func getProviderForModel(model string) string {
-	lowerModel := strings.ToLower(model)
-	if strings.HasPrefix(lowerModel, "claude-") {
-		return "anthropic"
+// New creates a new tool server.
+func New(opts Options) *Server {
+	return &Server{
+		manager:   vbox.NewManager(opts.SOAPAddr),
+		listen:    opts.ListenAddr,
+		vmUser:    opts.VMUser,
+		vmPass:    opts.VMPass,
+		display:   tools.DisplayConfig{Width: opts.Width, Height: opts.Height},
+		shared:    opts.SharedDir,
+		computers: make(map[string]*tools.ComputerTool),
+		bashes:    make(map[string]*tools.BashTool),
+		editors:   make(map[string]*tools.EditorTool),
 	}
-	if strings.HasPrefix(lowerModel, "gpt-") || strings.HasPrefix(lowerModel, "o1") || strings.HasPrefix(lowerModel, "o3") {
-		return "openai"
-	}
-	if strings.HasPrefix(lowerModel, "gemini-") {
-		return "gemini"
-	}
-	if lowerModel == "lux" || strings.HasPrefix(lowerModel, "lux-") {
-		return "lux"
-	}
-	return ""
 }
 
-func Run(opts Options) error {
-	var err error
-	orchestrator, err = sandbox.NewSandboxOrchestrator()
-	if err != nil {
-		return fmt.Errorf("failed to create orchestrator: %w", err)
-	}
+// Manager returns the underlying VM manager.
+func (s *Server) Manager() *vbox.Manager {
+	return s.manager
+}
 
-	sessionManager = NewSessionManager()
-	computerTool = tools.NewComputerTool()
-
+// Run starts the HTTP server.
+func (s *Server) Run() error {
 	mux := http.NewServeMux()
 	startTime := time.Now()
 
-	mux.HandleFunc("/run", func(w http.ResponseWriter, r *http.Request) {
-		handleRun(w, r)
-	})
+	// Tool routes
+	mux.HandleFunc("/tools", s.handleGetTools)
+	mux.HandleFunc("/actions", s.handleAction)
+	mux.HandleFunc("/actions/batch", s.handleBatchAction)
 
+	// VM lifecycle routes
+	mux.HandleFunc("/vm", s.handleVM)
+	mux.HandleFunc("/vm/", s.handleVMNamed)
+
+	// Health
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		writeJSON(w, http.StatusOK, map[string]any{
 			"status":         "ok",
 			"uptime_seconds": time.Since(startTime).Seconds(),
 		})
 	})
 
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		status := "idle"
-		if !runLock.TryLock() {
-			status = "busy"
-		} else {
-			runLock.Unlock()
+	log.Printf("dexbox tool server listening on %s", s.listen)
+	return http.ListenAndServe(s.listen, mux)
+}
+
+// --- Tool routes ---
+
+func (s *Server) handleGetTools(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	modelID := r.URL.Query().Get("model")
+	adapter, err := tools.AdapterForModel(modelID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":              "unknown_model",
+			"message":            fmt.Sprintf("Unknown model %q", modelID),
+			"supported_prefixes": tools.SupportedPrefixes(),
+		})
+		return
+	}
+
+	caps := []string{"computer", "bash", "text_editor"}
+	defs := adapter.ToolDefinitions(caps, s.display)
+	writeJSON(w, http.StatusOK, defs)
+}
+
+func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	modelID := r.URL.Query().Get("model")
+	adapter, err := tools.AdapterForModel(modelID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":              "unknown_model",
+			"message":            fmt.Sprintf("Unknown model %q", modelID),
+			"supported_prefixes": tools.SupportedPrefixes(),
+		})
+		return
+	}
+
+	vmName, err := s.resolveVM(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error":   "vm_unavailable",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": "failed to read request body",
+		})
+		return
+	}
+
+	action, err := adapter.ParseToolCall(json.RawMessage(body))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	result, err := s.executeAction(r, vmName, action)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":   "tool_error",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// Content negotiation: Accept: image/png for raw screenshot bytes
+	if result.Image != nil && r.Header.Get("Accept") == "image/png" {
+		w.Header().Set("Content-Type", "image/png")
+		w.WriteHeader(http.StatusOK)
+		w.Write(result.Image)
+		return
+	}
+
+	formatted, err := adapter.FormatResult(action, result)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":   "tool_error",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(formatted)
+}
+
+func (s *Server) handleBatchAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	modelID := r.URL.Query().Get("model")
+	adapter, err := tools.AdapterForModel(modelID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":              "unknown_model",
+			"message":            fmt.Sprintf("Unknown model %q", modelID),
+			"supported_prefixes": tools.SupportedPrefixes(),
+		})
+		return
+	}
+
+	vmName, err := s.resolveVM(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error":   "vm_unavailable",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	var batch []json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": "expected JSON array",
+		})
+		return
+	}
+
+	results := make([]json.RawMessage, 0, len(batch))
+	for _, raw := range batch {
+		action, err := adapter.ParseToolCall(raw)
+		if err != nil {
+			errJSON, _ := json.Marshal(map[string]any{
+				"error":   "bad_request",
+				"message": err.Error(),
+			})
+			results = append(results, errJSON)
+			continue
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": status,
-		})
-	})
+		result, err := s.executeAction(r, vmName, action)
+		if err != nil {
+			errJSON, _ := json.Marshal(map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			results = append(results, errJSON)
+			continue
+		}
 
-	mux.HandleFunc("/cancel", func(w http.ResponseWriter, r *http.Request) {
-		// For now, since we only run one workflow at a time via runLock,
-		// we should actually find the active container and kill it.
-		// A full implementation requires tracking the active container ID in the orchestrator.
-		// Let's return a simple response.
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"msg":     "Cancel requested",
-		})
-	})
+		formatted, err := adapter.FormatResult(action, result)
+		if err != nil {
+			errJSON, _ := json.Marshal(map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			results = append(results, errJSON)
+			continue
+		}
 
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Handle internal workflow routes
-		if strings.HasPrefix(r.URL.Path, "/internal/workflow/") {
-			handleInternalWorkflow(w, r)
+		results = append(results, formatted)
+	}
+
+	writeJSON(w, http.StatusOK, results)
+}
+
+// --- VM lifecycle routes ---
+
+func (s *Server) handleVM(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	switch r.Method {
+	case http.MethodGet:
+		// List VMs
+		vms, err := s.manager.List(ctx)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		if vms == nil {
+			vms = []vbox.VMStatus{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"vms": vms})
+
+	case http.MethodPost:
+		// Create VM
+		var req struct {
+			Name string `json:"name,omitempty"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+
+		name := req.Name
+		if name == "" {
+			name = fmt.Sprintf("dexbox-%s", randomSuffix())
+		}
+
+		if vbox.VMExists(ctx, name) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":   "vm_exists",
+				"message": fmt.Sprintf("VM %q already exists. Use a different name or DELETE /vm/%s first.", name, name),
+			})
 			return
 		}
 
-		http.NotFound(w, r)
-	})
-
-	log.Printf("dexbox server (Go natively handling requests) is listening on %s", opts.ListenAddr)
-
-	server := &http.Server{
-		Addr:    opts.ListenAddr,
-		Handler: mux,
-	}
-
-	return server.ListenAndServe()
-}
-
-func handleRun(w http.ResponseWriter, r *http.Request) {
-	startTime := time.Now()
-
-	if !runLock.TryLock() {
-		http.Error(w, "A workflow is already running", http.StatusTooManyRequests)
-		return
-	}
-	defer runLock.Unlock()
-
-	var req RunRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// 1. Initialize session in Go
-	log.Printf("Initializing session in Go for workflow: %s", req.WorkflowID)
-
-	session := &Session{
-		APIKey:           req.APIKey,
-		AnthropicAPIKey:  req.AnthropicAPIKey,
-		OpenAIAPIKey:     req.OpenAIAPIKey,
-		LuxAPIKey:        req.LuxAPIKey,
-		GeminiAPIKey:     req.GeminiAPIKey,
-		Model:            req.Model,
-		Provider:         req.Provider,
-		AnthropicBaseURL: req.AnthropicBaseURL,
-		WorkflowID:       req.WorkflowID,
-		Variables:        req.Variables,
-		SecureParams:     req.SecureParams,
-		Code:             req.Script,
-		OpenAIBaseURL:    req.OpenAIBaseURL,
-	}
-	token := sessionManager.CreateSession(session)
-	log.Printf("Created session %s", token)
-
-	// 2. Load harness script
-	pwd, _ := os.Getwd()
-	harnessPath := filepath.Join(pwd, "src", "dexbox", "harness", "python.py")
-	harnessBytes, err := os.ReadFile(harnessPath)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to read harness: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// 3. Start Sandbox
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-
-	containerID, containerLogs, err := orchestrator.RunContainer(ctx, token, string(harnessBytes))
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to start sandbox: %v", err), http.StatusInternalServerError)
-		return
-	}
-	defer containerLogs.Close()
-
-	// 4. Set headers for streaming
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	w.WriteHeader(http.StatusOK)
-
-	// Send "started" event
-	json.NewEncoder(w).Encode(map[string]any{
-		"type": "started",
-		"ts":   time.Now().Unix(),
-		"data": map[string]string{"workflow_id": req.WorkflowID},
-	})
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
-	}
-
-	done := make(chan struct{})
-
-	// 5. Merge streams: Container logs + Go agent events
-	go func() {
-		defer close(done)
-		for event := range session.EventQueue {
-			event["ts"] = time.Now().Unix()
-			json.NewEncoder(w).Encode(event)
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-		}
-	}()
-
-	pr, pw := io.Pipe()
-	go func() {
-		defer pw.Close()
-		stdcopy.StdCopy(pw, pw, containerLogs)
-	}()
-
-	scanner := bufio.NewScanner(pr)
-	for scanner.Scan() {
-		line := scanner.Text()
-		var progressEvent map[string]any
-		if err := json.Unmarshal([]byte(line), &progressEvent); err == nil && progressEvent["type"] != nil {
-			// It's already an event from the harness, pass it through
-			w.Write([]byte(line + "\n"))
-		} else {
-			json.NewEncoder(w).Encode(map[string]any{
-				"type": "progress",
-				"ts":   time.Now().Unix(),
-				"data": map[string]string{"type": "log", "data": line},
+		if err := s.manager.Create(ctx, name, vbox.DefaultVMConfig()); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
 			})
+			return
 		}
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
+
+		if err := s.manager.Start(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
 		}
+
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"name":  name,
+			"state": "running",
+		})
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
-
-	// 6. Final result
-	exitCode, _ := orchestrator.WaitAndCleanup(ctx, containerID)
-
-	// Close queue so goroutine ends
-	close(session.EventQueue)
-	<-done
-
-	// Cleanup session
-	sessionManager.DeleteSession(token)
-
-	res := map[string]any{
-		"success":     exitCode == 0,
-		"exit_code":   exitCode,
-		"duration_ms": time.Since(startTime).Milliseconds(),
-	}
-
-	if session.OutputData != nil {
-		if result, ok := session.OutputData["result"]; ok {
-			res["result"] = result
-		}
-	}
-
-	json.NewEncoder(w).Encode(map[string]any{
-		"type": "result",
-		"ts":   time.Now().Unix(),
-		"data": res,
-	})
 }
 
-func handleInternalWorkflow(w http.ResponseWriter, r *http.Request) {
-	token := r.Header.Get("X-Session-Token")
-	if token == "" {
-		http.Error(w, "Missing X-Session-Token", http.StatusUnauthorized)
+func (s *Server) handleVMNamed(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Parse /vm/{name}[/action]
+	path := strings.TrimPrefix(r.URL.Path, "/vm/")
+	parts := strings.SplitN(path, "/", 2)
+	name := parts[0]
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+
+	if name == "" {
+		http.NotFound(w, r)
 		return
 	}
 
-	session, err := sessionManager.GetSession(token)
-	if err != nil {
-		log.Printf("Session not found in Go: %s.", token)
-		http.Error(w, "Session not found", http.StatusUnauthorized)
+	if !vbox.VMExists(ctx, name) {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"error":   "vm_not_found",
+			"message": fmt.Sprintf("VM %q does not exist", name),
+		})
 		return
 	}
-
-	path := r.URL.Path
-	log.Printf("Handling internal workflow request: %s %s", r.Method, path)
 
 	switch {
-	case path == "/internal/workflow/load":
-		handleWorkflowLoad(w, r, session)
+	case r.Method == http.MethodDelete && action == "":
+		if err := s.manager.Delete(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "deleted"})
 
-	case path == "/internal/workflow/output":
-		handleWorkflowOutput(w, r, session)
+	case r.Method == http.MethodGet && action == "status":
+		status, err := s.manager.Status(ctx, name)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
 
-	case path == "/internal/workflow/assets":
-		handleWorkflowAssets(w, r, session)
+	case r.Method == http.MethodPost && action == "start":
+		if err := s.manager.Start(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "running"})
 
-	case strings.HasPrefix(path, "/internal/workflow/keyboard/"):
-		handleKeyboardAction(w, r, session)
+	case r.Method == http.MethodPost && action == "stop":
+		if err := s.manager.Stop(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "poweroff"})
 
-	case strings.HasPrefix(path, "/internal/workflow/mouse/"):
-		handleMouseAction(w, r, session)
+	case r.Method == http.MethodPost && action == "pause":
+		if err := s.manager.Pause(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "paused"})
 
-	case path == "/internal/workflow/execute":
-		handleExecute(w, r, session)
+	case r.Method == http.MethodPost && action == "suspend":
+		if err := s.manager.Suspend(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "saved"})
 
-	case path == "/internal/workflow/validate":
-		handleValidate(w, r, session)
-
-	case path == "/internal/workflow/extract":
-		handleExtract(w, r, session)
-
-	case path == "/internal/workflow/drive/files":
-		handleDriveFiles(w, r)
-
-	case path == "/internal/workflow/drive/read":
-		handleDriveRead(w, r)
+	case r.Method == http.MethodPost && action == "resume":
+		if err := s.manager.Resume(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "running"})
 
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-func handleWorkflowLoad(w http.ResponseWriter, r *http.Request, session *Session) {
-	json.NewEncoder(w).Encode(map[string]any{
-		"code": session.Code,
-		"data": session.Variables,
-	})
-}
+// --- Internal helpers ---
 
-func handleWorkflowOutput(w http.ResponseWriter, r *http.Request, session *Session) {
-	var req map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-		session.OutputData = req
-
-		// Send output as an event
-		session.EventQueue <- map[string]any{
-			"type": "output",
-			"data": req,
+func (s *Server) resolveVM(r *http.Request) (string, error) {
+	vmName := r.URL.Query().Get("vm")
+	if vmName != "" {
+		state, err := vbox.VMState(r.Context(), vmName)
+		if err != nil {
+			return "", fmt.Errorf("VM %q not found", vmName)
 		}
+		if state != "running" {
+			return "", fmt.Errorf("VM %q is not running (state: %s). Start it with POST /vm/%s/start", vmName, state, vmName)
+		}
+		return vmName, nil
 	}
-	json.NewEncoder(w).Encode(map[string]any{"success": true})
-}
 
-func handleWorkflowAssets(w http.ResponseWriter, r *http.Request, session *Session) {
-	bodyBytes, err := io.ReadAll(r.Body)
+	// Auto-resolve: find running VMs
+	vms, err := s.manager.List(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return "", fmt.Errorf("failed to list VMs: %w", err)
 	}
 
-	// The zip file from the sandbox container
-	zipFilename := session.WorkflowID + ".zip"
-
-	// For now, optionally write the zip file to disk.
-	artifactsDir := "/tmp/dexbox-artifacts"
-	os.MkdirAll(artifactsDir, 0755)
-	if err := os.WriteFile(filepath.Join(artifactsDir, zipFilename), bodyBytes, 0644); err != nil {
-		log.Printf("Failed to write zip file: %v", err)
-	}
-
-	// Notify the CLI that assets were saved (without streaming the full content)
-	if len(bodyBytes) > 0 {
-		assetFilename := fmt.Sprintf("assets/%s/assets.zip", session.WorkflowID)
-		log.Printf("Assets saved: %s (%d bytes)", assetFilename, len(bodyBytes))
-		session.EventQueue <- map[string]any{
-			"type": "progress",
-			"data": map[string]any{
-				"type": "assets",
-				"data": map[string]string{
-					"filename": assetFilename,
-					"size":     fmt.Sprintf("%d", len(bodyBytes)),
-				},
-			},
+	var running []string
+	for _, vm := range vms {
+		if vm.State == "running" {
+			running = append(running, vm.Name)
 		}
 	}
 
-	json.NewEncoder(w).Encode(map[string]any{"success": true})
+	if len(running) == 0 {
+		return "", fmt.Errorf("no running VMs. Create one with POST /vm")
+	}
+	if len(running) > 1 {
+		return "", fmt.Errorf("multiple running VMs found (%s), specify ?vm=<name>", strings.Join(running, ", "))
+	}
+	return running[0], nil
 }
 
-func handleExecute(w http.ResponseWriter, r *http.Request, session *Session) {
-	var req struct {
-		Instruction   string `json:"instruction"`
-		MaxIterations int    `json:"max_iterations"`
-		ModelOverride string `json:"model_override"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	maxIter := req.MaxIterations
-	if maxIter == 0 {
-		maxIter = 25
-	}
-
-	model := session.Model
-	if req.ModelOverride != "" {
-		model = req.ModelOverride
-	}
-
-	providerStr := getProviderForModel(model)
-	if providerStr == "" {
-		providerStr = session.Provider // Fallback
-	}
-
-	// Create a new agent and run it
-	importAgent := "github.com/getnenai/dexbox/internal/agent"
-	_ = importAgent // Ensure agent is imported in the file though we will add imports
-
-	log.Printf("Execute request: sessionModel=%q, reqModelOverride=%q, finalModel=%q, inferredProvider=%q", session.Model, req.ModelOverride, model, providerStr)
-
-	// Execute the agent Loop
-	var provider cua.Provider
-	if providerStr == "openai" {
-		key := session.OpenAIAPIKey
-		if key == "" {
-			key = session.APIKey // fallback
+func (s *Server) executeAction(r *http.Request, vmName string, action *tools.CanonicalAction) (*tools.CanonicalResult, error) {
+	switch action.Tool {
+	case "computer":
+		ct, err := s.getComputerTool(r, vmName)
+		if err != nil {
+			return nil, err
 		}
-		provider = openai.NewClient(key, model, session.OpenAIBaseURL)
-	} else {
-		key := session.AnthropicAPIKey
-		if key == "" {
-			key = session.APIKey
+		return ct.Execute(r.Context(), action)
+	case "bash":
+		bt := s.getBashTool(vmName)
+		command, _ := action.Params["command"].(string)
+		out, err := bt.Execute(r.Context(), command, 2*time.Minute)
+		if err != nil {
+			return nil, err
 		}
-		provider = anthropic.NewClient(key, model, session.AnthropicBaseURL)
+		return &tools.CanonicalResult{Output: out}, nil
+	case "text_editor":
+		et := s.getEditorTool(vmName)
+		return et.Execute(r.Context(), action)
+	default:
+		return nil, fmt.Errorf("unknown tool %q", action.Tool)
 	}
-	ag := agent.NewAgent(provider, session.EventQueue)
-	messages, err := ag.SamplingLoop(r.Context(), req.Instruction, maxIter)
-
-	if err != nil {
-		log.Printf("execute failed: %v", err)
-		json.NewEncoder(w).Encode(map[string]any{
-			"success": false,
-			"error":   err.Error(),
-		})
-		return
-	}
-
-	json.NewEncoder(w).Encode(map[string]any{
-		"success":  true,
-		"messages": messages,
-	})
 }
 
-func handleValidate(w http.ResponseWriter, r *http.Request, session *Session) {
-	var req struct {
-		Question      string `json:"question"`
-		Timeout       int    `json:"timeout"`
-		ModelOverride string `json:"model_override"`
+func (s *Server) getComputerTool(r *http.Request, vmName string) (*tools.ComputerTool, error) {
+	if ct, ok := s.computers[vmName]; ok {
+		return ct, nil
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// For now, return a placeholder success or just shell out to a quick LLM call in Go
-	// We'll just call the basic anthropic client here or leave it stubbed for validate
-	// until we fully replicate UI Perception. The agent can use computerTool to screenshot.
-	log.Printf("Validate requested for %s", req.Question)
-
-	// We need a perception method, but for now we will just use a minimal version here:
-	b64, err := computerTool.Screenshot(r.Context(), "/tmp")
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
-		return
-	}
-
-	model := session.Model
-	if req.ModelOverride != "" {
-		model = req.ModelOverride
-	}
-
-	providerStr := getProviderForModel(model)
-	if providerStr == "" {
-		providerStr = session.Provider // Fallback
-	}
-
-	prompt := fmt.Sprintf("Look at this screenshot and answer: %s\n\nRespond with JSON: {\"is_match\": true/false, \"match_reason\": \"brief explanation\"}", req.Question)
-
-	var text string
-	if providerStr == "openai" {
-		key := session.OpenAIAPIKey
-		if key == "" {
-			key = session.APIKey
+	if s.manager.SOAPClient(vmName) == nil {
+		if err := s.manager.ConnectSOAP(r.Context(), vmName); err != nil {
+			return nil, fmt.Errorf("SOAP connect failed: %w", err)
 		}
-		client := openai.NewClient(key, model, session.OpenAIBaseURL)
-		text, err = client.CallDirect(r.Context(), prompt, b64, 256)
-	} else {
-		key := session.AnthropicAPIKey
-		if key == "" {
-			key = session.APIKey
-		}
-		client := anthropic.NewClient(key, model, session.AnthropicBaseURL)
-		text, err = client.CallDirect(r.Context(), prompt, b64, 256)
 	}
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
-		return
-	}
-
-	var res map[string]any
-	// Simple JSON extraction
-	start := strings.Index(text, "{")
-	end := strings.LastIndex(text, "}")
-	if start != -1 && end != -1 && end > start {
-		json.Unmarshal([]byte(text[start:end+1]), &res)
-	}
-
-	isMatch, _ := res["is_match"].(bool)
-	reason, _ := res["match_reason"].(string)
-
-	json.NewEncoder(w).Encode(map[string]any{
-		"success": true, "is_valid": isMatch, "reason": reason,
-	})
+	ct := tools.NewComputerTool(vmName, s.display.Width, s.display.Height, s.manager.SOAPClient(vmName))
+	s.computers[vmName] = ct
+	return ct, nil
 }
 
-func handleExtract(w http.ResponseWriter, r *http.Request, session *Session) {
-	var req struct {
-		Query         string         `json:"query"`
-		SchemaDef     map[string]any `json:"schema_def"`
-		ModelOverride string         `json:"model_override"`
+func (s *Server) getBashTool(vmName string) *tools.BashTool {
+	if bt, ok := s.bashes[vmName]; ok {
+		return bt
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	b64, err := computerTool.Screenshot(r.Context(), "/tmp")
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
-		return
-	}
-
-	model := session.Model
-	if req.ModelOverride != "" {
-		model = req.ModelOverride
-	}
-
-	providerStr := getProviderForModel(model)
-	if providerStr == "" {
-		providerStr = session.Provider // Fallback
-	}
-
-	schemaBytes, _ := json.Marshal(req.SchemaDef)
-	prompt := fmt.Sprintf("Look at this screenshot. %s\n\nReturn your answer as JSON matching this schema: %s\nReturn ONLY valid JSON, do not include markdown formatting or explanations.", req.Query, string(schemaBytes))
-
-	var text string
-	if providerStr == "openai" {
-		key := session.OpenAIAPIKey
-		if key == "" {
-			key = session.APIKey
-		}
-		client := openai.NewClient(key, model, session.OpenAIBaseURL)
-		text, err = client.CallDirect(r.Context(), prompt, b64, 1024)
-	} else {
-		key := session.AnthropicAPIKey
-		if key == "" {
-			key = session.APIKey
-		}
-		client := anthropic.NewClient(key, model, session.AnthropicBaseURL)
-		text, err = client.CallDirect(r.Context(), prompt, b64, 1024)
-	}
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
-		return
-	}
-
-	var res map[string]any
-	start := strings.Index(text, "{")
-	end := strings.LastIndex(text, "}")
-	if start != -1 && end != -1 && end > start {
-		json.Unmarshal([]byte(text[start:end+1]), &res)
-	}
-
-	json.NewEncoder(w).Encode(map[string]any{
-		"success": true, "data": res,
-	})
+	bt := tools.NewBashTool(vmName, s.vmUser, s.vmPass)
+	s.bashes[vmName] = bt
+	return bt
 }
 
-func handleKeyboardAction(w http.ResponseWriter, r *http.Request, session *Session) {
-	var req struct {
-		Text          string   `json:"text"`
-		SecureValueID string   `json:"secure_value_id"`
-		Key           string   `json:"key"`
-		Keys          []string `json:"keys"`
-		Interval      float64  `json:"interval"`
+func (s *Server) getEditorTool(vmName string) *tools.EditorTool {
+	if et, ok := s.editors[vmName]; ok {
+		return et
 	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	var actionErr error
-	ctx := r.Context()
-
-	switch r.URL.Path {
-	case "/internal/workflow/keyboard/type":
-		text := req.Text
-		if req.SecureValueID != "" {
-			if val, ok := session.SecureParams[req.SecureValueID]; ok {
-				text = val
-			} else {
-				actionErr = fmt.Errorf("secure value %s not found", req.SecureValueID)
-			}
-		}
-		if actionErr == nil {
-			actionErr = computerTool.Type(ctx, text)
-		}
-	case "/internal/workflow/keyboard/press":
-		actionErr = computerTool.Key(ctx, req.Key)
-	case "/internal/workflow/keyboard/hotkey":
-		actionErr = computerTool.Key(ctx, strings.Join(req.Keys, "+"))
-	}
-
-	resp := map[string]any{"success": actionErr == nil}
-	if actionErr != nil {
-		errMsg := actionErr.Error()
-		resp["error"] = errMsg
-	}
-	json.NewEncoder(w).Encode(resp)
+	et := tools.NewEditorTool(vmName, s.vmUser, s.vmPass, s.shared)
+	s.editors[vmName] = et
+	return et
 }
 
-func handleMouseAction(w http.ResponseWriter, r *http.Request, session *Session) {
-	var req struct {
-		X         int    `json:"x"`
-		Y         int    `json:"y"`
-		Button    string `json:"button"`
-		Direction string `json:"direction"`
-		Amount    int    `json:"amount"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	var actionErr error
-	ctx := r.Context()
-
-	switch r.URL.Path {
-	case "/internal/workflow/mouse/click":
-		if err := computerTool.Move(ctx, req.X, req.Y); err != nil {
-			actionErr = err
-		} else {
-			actionErr = computerTool.Click(ctx, req.Button)
-		}
-	case "/internal/workflow/mouse/move":
-		actionErr = computerTool.Move(ctx, req.X, req.Y)
-	case "/internal/workflow/mouse/scroll":
-		actionErr = computerTool.Scroll(ctx, req.Direction, req.Amount, &req.X, &req.Y)
-	}
-
-	resp := map[string]any{"success": actionErr == nil}
-	if actionErr != nil {
-		errMsg := actionErr.Error()
-		resp["error"] = errMsg
-	}
-	json.NewEncoder(w).Encode(resp)
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
 }
 
-func handleDriveFiles(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Query().Get("path")
-	pattern := r.URL.Query().Get("pattern")
-	if pattern == "" {
-		pattern = "*"
-	}
-
-	// Basic security check: no path separators in pattern
-	if strings.ContainsAny(pattern, "/\\") || strings.Contains(pattern, "..") {
-		http.Error(w, "Invalid pattern", http.StatusBadRequest)
-		return
-	}
-
-	// In a real implementation, we should validate 'path' against ALLOWED_DRIVE_PREFIXES.
-	// For now, we'll just use it.
-	matches, err := filepath.Glob(filepath.Join(path, pattern))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	type FileInfo struct {
-		Name     string  `json:"name"`
-		Path     string  `json:"path"`
-		Size     int64   `json:"size"`
-		Modified float64 `json:"modified"`
-	}
-
-	files := []FileInfo{}
-	for _, match := range matches {
-		info, err := os.Stat(match)
-		if err == nil && !info.IsDir() {
-			files = append(files, FileInfo{
-				Name:     info.Name(),
-				Path:     path,
-				Size:     info.Size(),
-				Modified: float64(info.ModTime().Unix()),
-			})
-		}
-	}
-
-	json.NewEncoder(w).Encode(map[string]any{"files": files})
-}
-
-func handleDriveRead(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Query().Get("path")
-	filename := r.URL.Query().Get("filename")
-
-	if strings.Contains(filename, "..") || strings.ContainsAny(filename, "/\\") {
-		http.Error(w, "Invalid filename", http.StatusForbidden)
-		return
-	}
-
-	fullPath := filepath.Join(path, filename)
-	data, err := os.ReadFile(fullPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			http.Error(w, "File not found", http.StatusNotFound)
-		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Write(data)
+func randomSuffix() string {
+	return fmt.Sprintf("%x", time.Now().UnixNano()&0xffffff)
 }

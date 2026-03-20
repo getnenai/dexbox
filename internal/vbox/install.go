@@ -1,0 +1,503 @@
+package vbox
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	_ "embed"
+	"encoding/binary"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+)
+
+//go:embed autounattend.xml
+var autounattendXML []byte
+
+const (
+	isoURL         = "https://software-static.download.prss.microsoft.com/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/22631.2428.231001-0608.23H2_NI_RELEASE_SVC_REFRESH_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso"
+	isoCacheDir    = ".dexbox/iso"
+	isoFilename    = "Win11_Enterprise_Eval.iso"
+	isoFilenameARM = "Win11_ARM_Enterprise_Eval.iso"
+)
+
+// Install runs the full provisioning flow: install VirtualBox, download ISO, create VM.
+// vmName is the name for the new VirtualBox VM.
+// isoOverride may be empty; if set it skips the download and uses the given path directly.
+func Install(ctx context.Context, vmName, isoOverride string) error {
+	// Step 1: Check/install VirtualBox
+	if err := ensureVirtualBox(); err != nil {
+		return fmt.Errorf("VirtualBox installation: %w", err)
+	}
+
+	// Step 2: Download Windows 11 ISO
+	isoPath, err := ensureISO(ctx, isoOverride)
+	if err != nil {
+		return fmt.Errorf("ISO: %w", err)
+	}
+
+	// Step 3: Create VM
+	fmt.Printf("Creating VM %q...\n", vmName)
+	wantOSType := "Windows11_64"
+	if nativeArch() == "arm64" {
+		wantOSType = "Windows 11 on ARM (64-bit)"
+	}
+	if VMExists(ctx, vmName) {
+		if got := VMOSType(ctx, vmName); got != wantOSType {
+			fmt.Printf("VM %q has wrong ostype %q (need %q), deleting and recreating...\n",
+				vmName, got, wantOSType)
+			if err := DeleteVM(ctx, vmName); err != nil {
+				return fmt.Errorf("delete wrong-arch VM: %w", err)
+			}
+		} else {
+			fmt.Printf("VM %q already exists, skipping creation.\n", vmName)
+		}
+	}
+	if !VMExists(ctx, vmName) {
+		cfg := DefaultVMConfig()
+		if err := CreateVM(ctx, vmName, cfg); err != nil {
+			return fmt.Errorf("create VM: %w", err)
+		}
+		fmt.Println("VM created.")
+	}
+
+	// Step 4: Unattended install
+	fmt.Println("Configuring unattended Windows install...")
+	if err := unattendedInstall(ctx, vmName, isoPath); err != nil {
+		return fmt.Errorf("unattended install: %w", err)
+	}
+
+	// Step 5: Start VM and wait for Guest Additions
+	fmt.Println("Starting VM...")
+	if err := StartVM(ctx, vmName, true); err != nil {
+		return fmt.Errorf("start VM: %w", err)
+	}
+
+	// OVMF shows "Press any key to boot from CD or DVD" briefly before booting
+	// the installer. Send repeated spacebar presses for the first ~15 seconds
+	// to ensure the prompt is dismissed regardless of when it appears.
+	// keyboardputstring works on both ARM (USB HID) and x86 (PS/2) VMs.
+	go func() {
+		for i := 0; i < 15; i++ {
+			time.Sleep(time.Second)
+			_ = SendKeyboardString(ctx, vmName, " ")
+		}
+	}()
+
+	fmt.Println("Waiting for Windows installation to complete (this may take 15-30 minutes)...")
+	if err := waitForInstallation(ctx, vmName); err != nil {
+		return fmt.Errorf("waiting for installation: %w", err)
+	}
+
+	// Step 6: Configure shared folder
+	home, _ := os.UserHomeDir()
+	sharedDir := filepath.Join(home, ".dexbox", "shared")
+	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		return fmt.Errorf("create shared dir: %w", err)
+	}
+	_ = AddSharedFolder(ctx, vmName, "shared", sharedDir)
+
+	// Step 7: Done
+	fmt.Println("")
+	fmt.Println("Installation complete!")
+	fmt.Printf("  VM name:    %s\n", vmName)
+	fmt.Printf("  User:       dexbox\n")
+	fmt.Printf("  Password:   dexbox123\n")
+	fmt.Printf("  Shared dir: %s\n", sharedDir)
+	fmt.Println("")
+	fmt.Println("Next steps:")
+	fmt.Println("  dexbox start     # Start the tool server")
+	fmt.Println("  dexbox status    # Check VM state")
+	return nil
+}
+
+func ensureVirtualBox() error {
+	if _, err := exec.LookPath("VBoxManage"); err == nil {
+		out, err := exec.Command("VBoxManage", "--version").Output()
+		if err == nil {
+			fmt.Printf("VirtualBox %s already installed.\n", string(out[:len(out)-1]))
+			return nil
+		}
+	}
+
+	fmt.Println("Installing VirtualBox...")
+	switch runtime.GOOS {
+	case "darwin":
+		return runCmd("brew", "install", "--cask", "virtualbox")
+	case "linux":
+		// Try apt first, then dnf
+		if _, err := exec.LookPath("apt"); err == nil {
+			return runCmd("sudo", "apt", "install", "-y", "virtualbox")
+		}
+		if _, err := exec.LookPath("dnf"); err == nil {
+			return runCmd("sudo", "dnf", "install", "-y", "VirtualBox")
+		}
+		return fmt.Errorf("unsupported Linux distro: install VirtualBox manually")
+	case "windows":
+		return runCmd("winget", "install", "Oracle.VirtualBox")
+	default:
+		return fmt.Errorf("unsupported OS: %s", runtime.GOOS)
+	}
+}
+
+func ensureISO(ctx context.Context, providedPath string) (string, error) {
+	// If caller supplied a path, verify it exists and use it directly.
+	if providedPath != "" {
+		if _, err := os.Stat(providedPath); err != nil {
+			return "", fmt.Errorf("provided ISO not found: %w", err)
+		}
+		fmt.Printf("Using ISO: %s\n", providedPath)
+		return providedPath, nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+
+	cacheDir := filepath.Join(home, isoCacheDir)
+
+	// On ARM hosts there is no stable auto-download URL for the Windows 11 ARM ISO.
+	// Check for a manually-cached copy; if absent, explain where to get it.
+	if nativeArch() == "arm64" {
+		cachedPath := filepath.Join(cacheDir, isoFilenameARM)
+		if _, err := os.Stat(cachedPath); err == nil {
+			fmt.Printf("ISO already cached at %s\n", cachedPath)
+			return cachedPath, nil
+		}
+		return "", fmt.Errorf(
+			"Windows 11 ARM ISO not found.\n"+
+				"Download it from:\n\n"+
+				"  https://www.microsoft.com/en-us/software-download/windows11arm64\n\n"+
+				"Then run:\n\n"+
+				"  dexbox create vm w11 --iso ~/Downloads/Win11_25H2_English_Arm64.iso\n\n"+
+				"Or save it to: %s", cachedPath,
+		)
+	}
+
+	isoPath := filepath.Join(cacheDir, isoFilename)
+
+	// Check if ISO already exists
+	if _, err := os.Stat(isoPath); err == nil {
+		fmt.Printf("ISO already cached at %s\n", isoPath)
+		return isoPath, nil
+	}
+
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return "", err
+	}
+
+	fmt.Printf("Downloading Windows 11 Enterprise Eval ISO...\n")
+	fmt.Printf("  URL: %s\n", isoURL)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", isoURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d downloading ISO", resp.StatusCode)
+	}
+
+	tmpPath := isoPath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		f.Close()
+		os.Remove(tmpPath)
+	}()
+
+	// Progress tracking
+	total := resp.ContentLength
+	hash := sha256.New()
+	writer := io.MultiWriter(f, hash)
+
+	var written int64
+	buf := make([]byte, 32*1024)
+	lastReport := time.Now()
+
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			if _, wErr := writer.Write(buf[:n]); wErr != nil {
+				return "", wErr
+			}
+			written += int64(n)
+
+			if time.Since(lastReport) > 2*time.Second {
+				if total > 0 {
+					pct := float64(written) / float64(total) * 100
+					fmt.Printf("  %.1f%% (%d / %d MB)\n", pct, written/(1024*1024), total/(1024*1024))
+				} else {
+					fmt.Printf("  %d MB downloaded\n", written/(1024*1024))
+				}
+				lastReport = time.Now()
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+
+	f.Close()
+
+	checksum := hex.EncodeToString(hash.Sum(nil))
+	fmt.Printf("  SHA256: %s\n", checksum)
+
+	if err := os.Rename(tmpPath, isoPath); err != nil {
+		return "", err
+	}
+
+	fmt.Printf("  Saved to %s\n", isoPath)
+	return isoPath, nil
+}
+
+func unattendedInstall(ctx context.Context, vmName, isoPath string) error {
+	// Build a small ISO containing autounattend.xml and attach it alongside the
+	// Windows ISO. Windows Setup scans all attached removable media for
+	// autounattend.xml, so this sidesteps the brittle "VBoxManage unattended
+	// install" command which fails on Windows 11 Enterprise Eval ISOs.
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	// Write autounattend.xml into a staging directory.
+	stageDir, err := os.MkdirTemp("", "dexbox-autounattend-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stageDir)
+
+	xmlData := append([]byte(nil), autounattendXML...)
+	if nativeArch() == "arm64" {
+		xmlData = bytes.ReplaceAll(xmlData,
+			[]byte(`processorArchitecture="amd64"`),
+			[]byte(`processorArchitecture="arm64"`),
+		)
+		// The x86 VBoxWindowsAdditions.exe stub doesn't run on ARM64 Windows.
+		// Use the ARM64-specific installer instead.
+		xmlData = bytes.ReplaceAll(xmlData,
+			[]byte(`VBoxWindowsAdditions.exe`),
+			[]byte(`VBoxWindowsAdditions-arm64.exe`),
+		)
+	}
+
+	maxCount, _ := getMaxWimImageCount(isoPath)
+	if maxCount < 1 {
+		maxCount = 1
+	}
+	xmlData = bytes.ReplaceAll(xmlData,
+		[]byte(`__IMAGE_INDEX__`),
+		[]byte(fmt.Sprintf("%d", maxCount)),
+	)
+	if err := os.WriteFile(filepath.Join(stageDir, "autounattend.xml"), xmlData, 0o644); err != nil {
+		return err
+	}
+
+	// Create the ISO in the same cache directory as the Windows ISO so it
+	// persists for the duration of the installation.
+	isoDir := filepath.Join(home, isoCacheDir)
+	if err := os.MkdirAll(isoDir, 0o755); err != nil {
+		return fmt.Errorf("create iso cache dir: %w", err)
+	}
+	autounattendISO := filepath.Join(isoDir, "autounattend.iso")
+	if err := createISO(stageDir, autounattendISO); err != nil {
+		return fmt.Errorf("create autounattend ISO: %w", err)
+	}
+
+	// Attach the Windows installer ISO to SATA port 1.
+	if err := AttachISO(ctx, vmName, isoPath); err != nil {
+		return fmt.Errorf("attach Windows ISO: %w", err)
+	}
+
+	// Attach the autounattend ISO to SATA port 2.
+	if _, err := RunVBoxManage(ctx, "storageattach", vmName,
+		"--storagectl", "SATA", "--port", "2", "--device", "0",
+		"--type", "dvddrive", "--medium", autounattendISO); err != nil {
+		return fmt.Errorf("attach autounattend ISO: %w", err)
+	}
+
+	// Attach Guest Additions ISO to SATA port 3 so the unattended answer
+	// file can silently install them on first logon.
+	gaISO, err := GuestAdditionsISOPath()
+	if err != nil {
+		return fmt.Errorf("guest additions: %w", err)
+	}
+	if _, err := RunVBoxManage(ctx, "storageattach", vmName,
+		"--storagectl", "SATA", "--port", "3", "--device", "0",
+		"--type", "dvddrive", "--medium", gaISO); err != nil {
+		return fmt.Errorf("attach Guest Additions ISO: %w", err)
+	}
+
+	return nil
+}
+
+// createISO wraps platform-native tools to produce an ISO 9660 image from srcDir.
+func createISO(srcDir, destPath string) error {
+	// Remove any stale output file; hdiutil and genisoimage both refuse to
+	// overwrite an existing file.
+	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale ISO: %w", err)
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		out, err := exec.Command("hdiutil", "makehybrid",
+			"-iso", "-joliet",
+			"-o", destPath,
+			srcDir,
+		).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("hdiutil: %s: %w", strings.TrimSpace(string(out)), err)
+		}
+		return nil
+	default:
+		// Try genisoimage first (Debian/Ubuntu), then mkisofs (RHEL/Fedora/openSUSE).
+		for _, tool := range []string{"genisoimage", "mkisofs"} {
+			if _, lookErr := exec.LookPath(tool); lookErr != nil {
+				continue
+			}
+			out, err := exec.Command(tool, "-o", destPath, srcDir).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("%s: %s: %w", tool, strings.TrimSpace(string(out)), err)
+			}
+			return nil
+		}
+		return fmt.Errorf("neither genisoimage nor mkisofs found; install one with your package manager")
+	}
+}
+
+func waitForInstallation(ctx context.Context, vmName string) error {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	timeout := time.After(45 * time.Minute)
+	consecutiveRunning := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeout:
+			return fmt.Errorf("timeout waiting for installation to complete")
+		case <-ticker.C:
+			if GuestAdditionsReady(ctx, vmName) {
+				fmt.Println("Guest Additions active - installation complete!")
+				return nil
+			}
+			if guestOSReady(ctx, vmName) {
+				fmt.Println("Guest OS responding - installation complete!")
+				return nil
+			}
+			state, _ := VMState(ctx, vmName)
+			if state == "running" {
+				consecutiveRunning++
+			} else {
+				consecutiveRunning = 0
+			}
+			// If the VM has been running steadily for ~10 minutes without
+			// reboots, the OS has likely finished installing. Guest Additions
+			// may not reach RunLevel 2 on all platforms (e.g. ARM).
+			if consecutiveRunning >= 20 {
+				fmt.Println("VM running steadily - installation appears complete.")
+				fmt.Println("Note: Guest Additions may not be fully active; some features may be limited.")
+				return nil
+			}
+			fmt.Printf("  VM state: %s, waiting...\n", state)
+		}
+	}
+}
+
+func runCmd(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// nativeArch returns the host CPU architecture, bypassing Rosetta 2.
+// On Darwin it queries sysctl hw.machine; elsewhere it falls back to
+// runtime.GOARCH (which reflects compile-time arch, not the host).
+func nativeArch() string {
+	if runtime.GOOS == "darwin" {
+		out, err := exec.Command("sysctl", "-n", "hw.machine").Output()
+		if err == nil {
+			return strings.TrimSpace(string(out))
+		}
+	}
+	return runtime.GOARCH
+}
+
+// getMaxWimImageCount scans an ISO for WIM headers (magic MSWIM\0\0\0 + cbSize 208)
+// and returns the maximum ImageCount found in any embedded WIM. This efficiently
+// finds how many OS editions are packed in the ISO so we can auto-select the last one.
+func getMaxWimImageCount(isoPath string) (int, error) {
+	f, err := os.Open(isoPath)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	// 32MB chunks to read the file sequentially
+	buf := make([]byte, 32*1024*1024)
+	magic := []byte("MSWIM\000\000\000\xD0\x00\x00\x00")
+	var maxCount int
+
+	var overflow []byte
+	for {
+		n, err := f.Read(buf[len(overflow):])
+		if n == 0 && err != nil {
+			break
+		}
+		chunk := buf[:len(overflow)+n]
+
+		idx := 0
+		for {
+			pos := bytes.Index(chunk[idx:], magic)
+			if pos == -1 {
+				break
+			}
+			pos += idx
+
+			// WIM header has ImageCount (32-bit LE) at offset 44
+			if pos+48 > len(chunk) {
+				break
+			}
+
+			count := int(binary.LittleEndian.Uint32(chunk[pos+44 : pos+48]))
+			if count > maxCount {
+				maxCount = count
+			}
+			idx = pos + 12
+		}
+
+		if len(chunk) > 48 {
+			overflow = append([]byte(nil), chunk[len(chunk)-48:]...)
+			copy(buf, overflow)
+		} else {
+			overflow = append([]byte(nil), chunk...)
+			copy(buf, overflow)
+		}
+	}
+
+	return maxCount, nil
+}

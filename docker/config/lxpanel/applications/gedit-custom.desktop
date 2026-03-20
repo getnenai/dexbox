@@ -1,8 +1,0 @@
-[Desktop Entry]
-Name=Text Edit
-Comment=Simple text editor
-Exec=gedit
-Icon=org.gnome.gedit
-Type=Application
-Terminal=false
-Categories=TextEditor;Utility;

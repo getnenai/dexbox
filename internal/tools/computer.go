@@ -1,356 +1,280 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
-	"math"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strconv"
-	"strings"
+	"image"
+	"image/png"
+	"time"
 
-	"github.com/google/uuid"
+	"github.com/getnenai/dexbox/internal/vbox"
+	"golang.org/x/image/draw"
 )
 
-type ActionResponse struct {
-	Success bool    `json:"success"`
-	Error   *string `json:"error,omitempty"`
-}
-
-type CommandRunner interface {
-	runCommand(ctx context.Context, cmdName string, args ...string) (string, error)
-}
-
-type defaultRunner struct {
-	displayNum string
-}
-
-func (r *defaultRunner) runCommand(ctx context.Context, cmdName string, args ...string) (string, error) {
-	fullCmd := []string{cmdName}
-	if r.displayNum != "" {
-		fullCmd = append([]string{"DISPLAY=:" + r.displayNum}, fullCmd...)
-	}
-	fullCmd = append(fullCmd, args...)
-
-	cmd := exec.CommandContext(ctx, cmdName, args...)
-	if r.displayNum != "" {
-		cmd.Env = append(os.Environ(), "DISPLAY=:"+r.displayNum)
-	}
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(output), fmt.Errorf("command %s %v failed: %w (output: %s)", cmdName, args, err, string(output))
-	}
-	return string(output), nil
-}
-
+// ComputerTool executes computer-use actions (screenshot, keyboard, mouse)
+// against a VirtualBox VM.
 type ComputerTool struct {
-	DisplayNum string
-	Width      string
-	Height     string
-	Runner     CommandRunner
+	vmName  string
+	width   int
+	height  int
+	soap    *vbox.SOAPClient
+	cursorX int
+	cursorY int
 }
 
-type Resolution struct {
-	Width  int
-	Height int
-}
-
-var maxScalingTargets = []Resolution{
-	{1024, 768}, // XGA
-	{1280, 800}, // WXGA
-	{1366, 768}, // FWXGA
-}
-
-type ScalingSource string
-
-const (
-	ScalingSourceComputer ScalingSource = "computer"
-	ScalingSourceAPI      ScalingSource = "api"
-)
-
-func (c *ComputerTool) ScaleCoordinates(source ScalingSource, x, y int) (int, int) {
-	width, _ := strconv.Atoi(c.Width)
-	height, _ := strconv.Atoi(c.Height)
-
-	if width == 0 || height == 0 {
-		return x, y
-	}
-
-	ratio := float64(width) / float64(height)
-	var targetDimension *Resolution
-
-	for _, dim := range maxScalingTargets {
-		dimRatio := float64(dim.Width) / float64(dim.Height)
-		diff := dimRatio - ratio
-		if diff < 0 {
-			diff = -diff
-		}
-		if diff < 0.02 {
-			if dim.Width < width {
-				target := dim
-				targetDimension = &target
-			}
-			break
-		}
-	}
-
-	if targetDimension == nil {
-		return x, y
-	}
-
-	xScalingFactor := float64(targetDimension.Width) / float64(width)
-	yScalingFactor := float64(targetDimension.Height) / float64(height)
-
-	if source == ScalingSourceAPI {
-		return int(math.Round(float64(x) / xScalingFactor)), int(math.Round(float64(y) / yScalingFactor))
-	}
-
-	return int(math.Round(float64(x) * xScalingFactor)), int(math.Round(float64(y) * yScalingFactor))
-}
-
-func NewComputerTool() *ComputerTool {
-	displayNum := os.Getenv("DISPLAY_NUM")
+// NewComputerTool creates a computer tool bound to a specific VM.
+func NewComputerTool(vmName string, width, height int, soap *vbox.SOAPClient) *ComputerTool {
 	return &ComputerTool{
-		DisplayNum: displayNum,
-		Width:      os.Getenv("WIDTH"),
-		Height:     os.Getenv("HEIGHT"),
-		Runner:     &defaultRunner{displayNum: displayNum},
+		vmName: vmName,
+		width:  width,
+		height: height,
+		soap:   soap,
 	}
 }
 
-func (c *ComputerTool) Type(ctx context.Context, text string) error {
-	_, err := c.Runner.runCommand(ctx, "xdotool", "type", "--delay", "12", "--", text)
-	return err
+// Execute dispatches a canonical computer action.
+func (t *ComputerTool) Execute(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
+	switch action.Action {
+	case "screenshot":
+		return t.screenshot(ctx)
+	case "left_click":
+		return t.click(ctx, action, 1)
+	case "right_click":
+		return t.click(ctx, action, 2)
+	case "middle_click":
+		return t.click(ctx, action, 4)
+	case "double_click":
+		return t.doubleClick(ctx, action)
+	case "type":
+		return t.typeText(ctx, action)
+	case "key":
+		return t.key(ctx, action)
+	case "mouse_move":
+		return t.mouseMove(ctx, action)
+	case "scroll":
+		return t.scroll(ctx, action)
+	case "left_click_drag":
+		return t.drag(ctx, action)
+	case "cursor_position":
+		return &CanonicalResult{Coordinate: [2]int{t.cursorX, t.cursorY}}, nil
+	default:
+		return nil, fmt.Errorf("unknown computer action %q", action.Action)
+	}
 }
 
-func mapX11Key(key string) string {
-	keyMap := map[string]string{
-		"enter":     "Return",
-		"return":    "Return",
-		"escape":    "Escape",
-		"space":     "space",
-		"tab":       "Tab",
-		"backspace": "BackSpace",
-		"up":        "Up",
-		"down":      "Down",
-		"left":      "Left",
-		"right":     "Right",
-		"page_up":   "Page_Up",
-		"page_down": "Page_Down",
-		"home":      "Home",
-		"end":       "End",
+func (t *ComputerTool) screenshot(ctx context.Context) (*CanonicalResult, error) {
+	raw, err := vbox.Screenshot(ctx, t.vmName)
+	if err != nil {
+		return nil, err
 	}
-	if mapped, ok := keyMap[strings.ToLower(key)]; ok {
-		return mapped
+
+	resized, err := resizePNG(raw, t.width, t.height)
+	if err != nil {
+		// If resize fails, return original
+		resized = raw
 	}
-	return key
+
+	return &CanonicalResult{Image: resized}, nil
 }
 
-func (c *ComputerTool) Key(ctx context.Context, key string) error {
-	key = mapX11Key(key)
-	_, err := c.Runner.runCommand(ctx, "xdotool", "key", "--", key)
-	return err
+func (t *ComputerTool) click(ctx context.Context, action *CanonicalAction, buttonMask int) (*CanonicalResult, error) {
+	x, y, err := extractCoordinate(action)
+	if err != nil {
+		return nil, err
+	}
+	t.cursorX, t.cursorY = x, y
+
+	if err := t.soap.MouseClick(x, y, buttonMask); err != nil {
+		return nil, err
+	}
+	return &CanonicalResult{}, nil
 }
 
-func (c *ComputerTool) Click(ctx context.Context, button string) error {
-	btnMap := map[string]string{
-		"left":   "1",
-		"right":  "3",
-		"middle": "2",
+func (t *ComputerTool) doubleClick(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
+	x, y, err := extractCoordinate(action)
+	if err != nil {
+		return nil, err
 	}
-	btn, ok := btnMap[button]
-	if !ok {
-		btn = "1"
-	}
+	t.cursorX, t.cursorY = x, y
 
-	_, err := c.Runner.runCommand(ctx, "xdotool", "click", btn)
-	return err
+	if err := t.soap.MouseDoubleClick(x, y, 1); err != nil {
+		return nil, err
+	}
+	return &CanonicalResult{}, nil
 }
 
-func (c *ComputerTool) Move(ctx context.Context, x, y int) error {
-	// xdotool has a known idiosyncrasy: if you tell it to move the mouse with --sync to
-	// coordinates it is already at, it hangs indefinitely waiting for a motion event.
-	// We do a quick check to see if we're already there.
-	output, err := c.Runner.runCommand(ctx, "xdotool", "getmouselocation", "--shell")
-	if err == nil {
-		var curX, curY int
-		n, _ := fmt.Sscanf(output, "X=%d\nY=%d", &curX, &curY)
-		if n >= 2 && curX == x && curY == y {
-			return nil
+func (t *ComputerTool) typeText(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
+	text, _ := action.Params["text"].(string)
+	if text == "" {
+		return nil, fmt.Errorf("field 'text' required for action 'type'")
+	}
+
+	codes := vbox.TextToScancodes(text)
+	// Send in batches to avoid oversized VBoxManage argument lists.
+	const batchSize = 60
+	for i := 0; i < len(codes); i += batchSize {
+		end := i + batchSize
+		if end > len(codes) {
+			end = len(codes)
+		}
+		if err := vbox.SendScancodes(ctx, t.vmName, codes[i:end]); err != nil {
+			return nil, err
+		}
+		if end < len(codes) {
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
-
-	_, err = c.Runner.runCommand(ctx, "xdotool", "mousemove", "--sync", fmt.Sprintf("%d", x), fmt.Sprintf("%d", y))
-	return err
+	return &CanonicalResult{}, nil
 }
 
-func (c *ComputerTool) Scroll(ctx context.Context, direction string, amount int, x, y *int) error {
-	mouseMove := ""
-	if x != nil && y != nil {
-		mouseMove = fmt.Sprintf("mousemove --sync %d %d ", *x, *y)
+func (t *ComputerTool) key(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
+	text, _ := action.Params["text"].(string)
+	if text == "" {
+		return nil, fmt.Errorf("field 'text' required for action 'key'")
 	}
 
-	btnMap := map[string]string{
-		"up":    "4",
-		"down":  "5",
-		"left":  "6",
-		"right": "7",
+	codes := vbox.KeyToScancodes(text)
+	if err := vbox.SendScancodes(ctx, t.vmName, codes); err != nil {
+		return nil, err
 	}
-	btn, ok := btnMap[direction]
-	if !ok {
-		btn = "5"
-	}
-
-	args := []string{}
-	if mouseMove != "" {
-		args = append(args, "mousemove", "--sync", fmt.Sprintf("%d", *x), fmt.Sprintf("%d", *y))
-	}
-	args = append(args, "click", "--repeat", fmt.Sprintf("%d", amount), btn)
-
-	_, err := c.Runner.runCommand(ctx, "xdotool", args...)
-	return err
+	return &CanonicalResult{}, nil
 }
 
-func (c *ComputerTool) Screenshot(ctx context.Context, artifactsDir string) (string, error) {
-	// 1. Determine screenshot tool
-	var cmdName string
-	var args []string
-
-	path := filepath.Join("/tmp", fmt.Sprintf("screenshot_%s.png", uuid.New().String()[:8]))
-
-	if _, err := exec.LookPath("gnome-screenshot"); err == nil {
-		cmdName = "gnome-screenshot"
-		args = []string{"-f", path, "-p"}
-	} else if _, err := exec.LookPath("scrot"); err == nil {
-		cmdName = "scrot"
-		args = []string{"-p", path}
-	} else {
-		return "", fmt.Errorf("neither gnome-screenshot nor scrot found")
-	}
-
-	// 2. Take screenshot
-	_, err := c.Runner.runCommand(ctx, cmdName, args...)
+func (t *ComputerTool) mouseMove(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
+	x, y, err := extractCoordinate(action)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+	t.cursorX, t.cursorY = x, y
+
+	if err := t.soap.MouseMoveAbsolute(x, y); err != nil {
+		return nil, err
+	}
+	return &CanonicalResult{}, nil
+}
+
+func (t *ComputerTool) scroll(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
+	x, y, err := extractCoordinate(action)
+	if err != nil {
+		return nil, err
+	}
+	t.cursorX, t.cursorY = x, y
+
+	// Default scroll amount
+	dz := 3
+	if v, ok := action.Params["amount"].(float64); ok {
+		dz = int(v)
 	}
 
-	width, _ := strconv.Atoi(c.Width)
-	height, _ := strconv.Atoi(c.Height)
-	scaledW, scaledH := c.ScaleCoordinates(ScalingSourceComputer, width, height)
-	if scaledW != width && scaledW != 0 {
-		resizeCmd := fmt.Sprintf("%dx%d!", scaledW, scaledH)
-		_, err := c.Runner.runCommand(ctx, "convert", path, "-resize", resizeCmd, path)
-		if err != nil {
-			return "", fmt.Errorf("failed to resize screenshot: %w", err)
+	// Direction: negative dz = scroll down in VBox convention
+	dir, _ := action.Params["direction"].(string)
+	switch dir {
+	case "down", "":
+		dz = -dz
+	case "up":
+		// dz stays positive
+	default:
+		return nil, fmt.Errorf("invalid scroll direction %q; expected 'up' or 'down'", dir)
+	}
+
+	if err := t.soap.MouseScroll(x, y, dz); err != nil {
+		return nil, err
+	}
+	return &CanonicalResult{}, nil
+}
+
+func (t *ComputerTool) drag(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
+	startCoord, ok := action.Params["start_coordinate"].([]any)
+	if !ok || len(startCoord) < 2 {
+		return nil, fmt.Errorf("field 'start_coordinate' required for action 'left_click_drag'")
+	}
+	endCoord, ok := action.Params["coordinate"].([]any)
+	if !ok || len(endCoord) < 2 {
+		return nil, fmt.Errorf("field 'coordinate' required for action 'left_click_drag'")
+	}
+
+	sx := toInt(startCoord[0])
+	sy := toInt(startCoord[1])
+	ex := toInt(endCoord[0])
+	ey := toInt(endCoord[1])
+
+	// Press at start
+	if err := t.soap.MouseDown(sx, sy, 1); err != nil {
+		return nil, err
+	}
+
+	var success bool
+	defer func() {
+		if !success {
+			_ = t.soap.MouseUp(sx, sy)
 		}
-	}
+	}()
+	time.Sleep(100 * time.Millisecond)
 
-	// 3. Read and encode
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
+	// Move to end
+	if err := t.soap.MouseMoveAbsolute(ex, ey); err != nil {
+		return nil, err
 	}
-	defer os.Remove(path)
+	time.Sleep(50 * time.Millisecond)
 
-	return base64.StdEncoding.EncodeToString(data), nil
+	// Release
+	if err := t.soap.MouseUp(ex, ey); err != nil {
+		return nil, err
+	}
+	success = true
+
+	t.cursorX, t.cursorY = ex, ey
+	return &CanonicalResult{}, nil
 }
 
-func (c *ComputerTool) CursorPosition(ctx context.Context) (int, int, error) {
-	output, err := c.Runner.runCommand(ctx, "xdotool", "getmouselocation", "--shell")
-	if err != nil {
-		return 0, 0, err
-	}
+// --- Helpers ---
 
-	var x, y int
-	// output looks like: X=123\nY=456\nSCREEN=0\nWINDOW=123456
-	n, _ := fmt.Sscanf(output, "X=%d\nY=%d", &x, &y)
-	if n < 2 {
-		return 0, 0, fmt.Errorf("failed to parse cursor position from output: %q", output)
+func extractCoordinate(action *CanonicalAction) (int, int, error) {
+	coord, ok := action.Params["coordinate"].([]any)
+	if !ok || len(coord) < 2 {
+		return 0, 0, fmt.Errorf("field 'coordinate' required for action %q", action.Action)
 	}
-
-	// Coordinates returned from xdotool need scaling back to API space
-	scaledX, scaledY := c.ScaleCoordinates(ScalingSourceComputer, x, y)
-	return scaledX, scaledY, nil
+	return toInt(coord[0]), toInt(coord[1]), nil
 }
 
-func (c *ComputerTool) MouseDown(ctx context.Context, button string) error {
-	btnMap := map[string]string{
-		"left":   "1",
-		"right":  "3",
-		"middle": "2",
+func toInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	default:
+		return 0
 	}
-	btn, ok := btnMap[button]
-	if !ok {
-		return fmt.Errorf("invalid mouse button: %s", button)
-	}
-	_, err := c.Runner.runCommand(ctx, "xdotool", "mousedown", btn)
-	return err
 }
 
-func (c *ComputerTool) MouseUp(ctx context.Context, button string) error {
-	btnMap := map[string]string{
-		"left":   "1",
-		"right":  "3",
-		"middle": "2",
+// resizePNG decodes a PNG, resizes it to target dimensions, and re-encodes.
+func resizePNG(data []byte, width, height int) ([]byte, error) {
+	src, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
 	}
-	btn, ok := btnMap[button]
-	if !ok {
-		return fmt.Errorf("invalid mouse button: %s", button)
+
+	srcBounds := src.Bounds()
+	if srcBounds.Dx() == width && srcBounds.Dy() == height {
+		return data, nil // Already the right size
 	}
-	_, err := c.Runner.runCommand(ctx, "xdotool", "mouseup", btn)
-	return err
+
+	dst := image.NewRGBA(image.Rect(0, 0, width, height))
+	draw.BiLinear.Scale(dst, dst.Bounds(), src, srcBounds, draw.Over, nil)
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, dst); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
-func (c *ComputerTool) HoldKey(ctx context.Context, key string, duration float64) error {
-	key = mapX11Key(key)
-	_, err := c.Runner.runCommand(ctx, "xdotool", "keydown", key, "sleep", fmt.Sprintf("%f", duration), "keyup", key)
-	return err
-}
-
-func (c *ComputerTool) Zoom(ctx context.Context, x0, y0, x1, y1 int) (string, error) {
-	// Re-use screenshot logic to take a full screenshot, then crop it.
-	b64, err := c.Screenshot(ctx, "/tmp")
-	if err != nil {
-		return "", err
-	}
-
-	rawImage, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		return "", err
-	}
-
-	path := filepath.Join("/tmp", fmt.Sprintf("zoom_tmp_%s.png", uuid.New().String()[:8]))
-	err = os.WriteFile(path, rawImage, 0644)
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(path)
-
-	croppedPath := filepath.Join("/tmp", fmt.Sprintf("zoom_cropped_%s.png", uuid.New().String()[:8]))
-
-	// Screenshot() already returns an API-space image, so crop directly
-	// using the API-space coordinates.
-	width := x1 - x0
-	height := y1 - y0
-	if width <= 0 || height <= 0 {
-		return "", fmt.Errorf("invalid zoom region: width and height must be positive")
-	}
-
-	// Crop using ImageMagick
-	cropCmd := fmt.Sprintf("%dx%d+%d+%d", width, height, x0, y0)
-	_, err = c.Runner.runCommand(ctx, "convert", path, "-crop", cropCmd, "+repage", croppedPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to crop zoomed region: %w", err)
-	}
-	defer os.Remove(croppedPath)
-
-	data, err := os.ReadFile(croppedPath)
-	if err != nil {
-		return "", err
-	}
-
-	return base64.StdEncoding.EncodeToString(data), nil
+// ImageToBase64 encodes raw PNG bytes as a base64 string.
+func ImageToBase64(data []byte) string {
+	return base64.StdEncoding.EncodeToString(data)
 }

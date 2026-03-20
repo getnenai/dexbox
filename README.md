@@ -2,44 +2,46 @@
 
 [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?logo=discord&logoColor=white)](https://discord.gg/Bga4QkvEgZ)
 
-Run computer-use workflows locally using Docker. Workflows execute inside a sandboxed environment with access to a desktop environment.
+A VirtualBox-based tool server for computer-use AI agents. Dexbox runs a Windows 11 VM and exposes an HTTP API that any AI agent (Claude, GPT, Gemini) can call directly — no agent loop, no SDK, just pipe tool calls through.
 
 ## Requirements
 
-- Docker Desktop (or Docker Engine on Linux)
-- [Go 1.23+](https://go.dev/doc/install)
-- An Anthropic API key
+- [Go 1.24+](https://go.dev/doc/install)
+- [VirtualBox](https://www.virtualbox.org/) (auto-installed by `dexbox create vm`)
+- macOS, Linux, or Windows
 
 ## Quick Start
-
-Build the images
-
-```bash
-make build
-```
-
-Create a `.env` file with your `ANTHROPIC_API_KEY`
-
-```bash
-cp .env.example .env # add your ANTHROPIC_API_KEY to .env
-```
 
 Install the CLI
 
 ```bash
-go install github.com/getnenai/dexbox/cmd/dexbox@latest
+go install ./cmd/dexbox
 ```
 
-Start the desktop container
+Provision a Windows 11 VM (downloads ISO, creates VM, runs unattended install)
+
+The `--iso` is required for ARM hosts like Apple Silicon only.
+
+```bash
+dexbox create vm windows-1 --iso /path/to/windows.iso
+```
+
+Start the tool server
 
 ```bash
 dexbox start
 ```
 
-Run a workflow
+Take a screenshot
 
 ```bash
-dexbox run examples/extract-data.py
+dexbox run --type computer --action screenshot > shot.png
+```
+
+Run a PowerShell command
+
+```bash
+dexbox run --type bash --command "echo hello"
 ```
 
 Stop when done
@@ -48,207 +50,259 @@ Stop when done
 dexbox stop
 ```
 
-### Build and install locally:
+### Shell completion (macOS + zsh)
+
+Add to `~/.zshrc`:
+
+```zsh
+source <(dexbox completion zsh)
+```
+
+Then reload:
+
+```zsh
+source ~/.zshrc
+```
+
+## How It Works
+
+Dexbox is a **tool server**, not an agent. Your AI agent framework calls the HTTP API with tool actions in the model's native format. Dexbox parses, executes, and returns results — zero translation needed on your side.
+
+```
+Your Agent Framework
+  │  1. GET /tools?model=claude-sonnet-4-5-20250929  →  tool definitions
+  │  2. Pass definitions + instruction to Claude
+  │  3. Claude returns a tool call
+  │  4. POST /actions?model=claude-sonnet-4-5-20250929  →  forward raw tool call
+  │  5. Dexbox executes, returns result in Claude's format
+  v
+Dexbox Tool Server (:8600)
+  ├── /tools       →  tool definitions in any model's native format
+  ├── /actions     →  execute a tool action
+  ├── /actions/batch  →  batch sequential actions
+  ├── /vm          →  VM lifecycle (create, start, stop, pause, resume, destroy)
+  └── /health
+         │
+         ├── computer  →  VBoxManage (screenshots, scancodes) + SOAP (mouse)
+         ├── bash      →  VBoxManage guestcontrol → PowerShell
+         └── editor    →  VBoxManage guestcontrol → file I/O
+                │
+                v
+         VirtualBox VM (Windows 11, headless)
+```
+
+## API
+
+### Get tool definitions
+
+Returns tool definitions formatted for the specified model. The agent framework passes these directly to the model with no modification.
 
 ```bash
-make install-cli
-# installed to ~/.local/bin/dexbox
+# Claude
+curl 'localhost:8600/tools?model=claude-sonnet-4-5-20250929'
+
+# OpenAI
+curl 'localhost:8600/tools?model=gpt-4o'
+
+# Gemini
+curl 'localhost:8600/tools?model=gemini-2.0-flash'
 ```
 
-Or build only:
+### Execute a tool action
+
+Forward the model's raw tool call JSON. Dexbox parses it, executes, and returns the result in the model's expected format.
 
 ```bash
-make build-cli
-# binary is at ./bin/dexbox
+# Screenshot
+curl -X POST 'localhost:8600/actions?model=claude-sonnet-4-5-20250929' \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"computer_20250124","action":"screenshot"}'
+
+# Raw PNG (content negotiation)
+curl -X POST 'localhost:8600/actions?model=claude-sonnet-4-5-20250929' \
+  -H 'Accept: image/png' \
+  -d '{"type":"computer_20250124","action":"screenshot"}' -o shot.png
+
+# Click
+curl -X POST 'localhost:8600/actions?model=claude-sonnet-4-5-20250929' \
+  -d '{"type":"computer_20250124","action":"left_click","coordinate":[500,300]}'
+
+# Type text
+curl -X POST 'localhost:8600/actions?model=claude-sonnet-4-5-20250929' \
+  -d '{"type":"computer_20250124","action":"type","text":"hello world"}'
+
+# PowerShell
+curl -X POST 'localhost:8600/actions?model=claude-sonnet-4-5-20250929' \
+  -d '{"type":"bash_20250124","command":"Get-Process | Select-Object -First 5"}'
+
+# View file
+curl -X POST 'localhost:8600/actions?model=claude-sonnet-4-5-20250929' \
+  -d '{"type":"text_editor_20250124","command":"view","path":"C:\\Users\\dexbox\\file.txt"}'
 ```
 
-## Build the Docker images
+### Batch actions
+
+Execute multiple actions sequentially in a single request.
 
 ```bash
-make build
+curl -X POST 'localhost:8600/actions/batch?model=claude-sonnet-4-5-20250929' \
+  -d '[
+    {"type":"computer_20250124","action":"left_click","coordinate":[500,300]},
+    {"type":"computer_20250124","action":"screenshot"}
+  ]'
 ```
 
-This builds two images:
-
-- `dexbox:latest` — the desktop container (X11, VNC, parent service)
-- `dexbox-sandbox-python:latest` — the minimal sandbox container that runs workflow scripts
-
-## Writing Workflows
-
-Workflows are Python scripts with a `run(input)` function:
-
-```python workflow.py
-from dexbox import Agent, Computer
-
-def run(input: dict) -> dict:
-    agent = Agent()
-    computer = Computer()
-
-    agent.execute("Open web browser to https://news.ycombinator.com")
-    stories = agent.extract(
-        "Get the top 5 story titles",
-        schema={"type": "array", "items": {"type": "string"}},
-    )
-    return {"stories": stories}
-```
-
-Run it:
+### VM lifecycle
 
 ```bash
-dexbox run workflow.py
+# List VMs
+curl localhost:8600/vm
+
+# Create a new VM
+curl -X POST localhost:8600/vm -d '{"name":"my-vm"}'
+
+# Start / stop / pause / suspend / resume
+curl -X POST localhost:8600/vm/my-vm/start
+curl -X POST localhost:8600/vm/my-vm/stop
+curl -X POST localhost:8600/vm/my-vm/pause
+curl -X POST localhost:8600/vm/my-vm/suspend
+curl -X POST localhost:8600/vm/my-vm/resume
+
+# Status
+curl localhost:8600/vm/my-vm/status
+
+# Destroy
+curl -X DELETE localhost:8600/vm/my-vm
 ```
 
-Use the `--no-browser` flag to prevent the live stream from automatically opening in your browser.
+### Error responses
 
-## SDK Reference
-
-### `Agent`
-
-```python
-agent = Agent()
-
-# Execute a multi-step computer-use task
-agent.execute("Click the Login button and enter credentials")
-
-# Verify a visual condition
-if agent.verify("Is the dashboard visible?"):
-    ...
-
-# Extract structured data
-data = agent.extract("Get the user's email address", schema={"type": "string"})
+```json
+400  {"error": "bad_request",    "message": "field 'coordinate' required for action 'left_click'"}
+400  {"error": "unknown_model",  "message": "Unknown model 'foo'", "supported_prefixes": ["claude-","gpt-","gemini-"]}
+404  {"error": "vm_not_found",   "message": "VM 'foobar' does not exist"}
+409  {"error": "vm_exists",      "message": "VM 'my-vm' already exists"}
+502  {"error": "vm_unavailable", "message": "VM 'my-vm' is not running"}
+500  {"error": "tool_error",     "message": "VBoxManage screenshotpng failed: ..."}
 ```
 
-### `Computer`
+## CLI Reference
 
-```python
-computer = Computer()
+### System commands
 
-computer.type("Hello, world!")          # Type text
-computer.press("Return")                # Press a key
-computer.hotkey("ctrl", "c")            # Key combination
-computer.click_at(100, 200)             # Click coordinates
-computer.move(300, 400)                 # Move mouse
-computer.scroll("down", 3)              # Scroll
+| Command                                  | Description                                       |
+| ---------------------------------------- | ------------------------------------------------- |
+| `dexbox start`                           | Start the tool server and vboxwebsrv daemon        |
+| `dexbox stop`                            | Stop the tool server and vboxwebsrv                |
+| `dexbox status`                          | Show VM states                                     |
+| `dexbox create vm <name> [--iso <path>]` | Install VirtualBox and provision a new Windows VM  |
 
-# Access host files
-drive = computer.drive("/mnt/tmp")
-files = drive.files("*.pdf")
-content = files[0].read_bytes()
-```
+### VM commands
 
-### `SecureValue`
+| Command                      | Description                        |
+| ---------------------------- | ---------------------------------- |
+| `dexbox vm list`             | List all VMs                       |
+| `dexbox vm start [name]`     | Start a VM                         |
+| `dexbox vm stop [name]`      | Graceful ACPI shutdown             |
+| `dexbox vm poweroff [name]`  | Immediately cut power (force stop) |
+| `dexbox vm pause [name]`     | Freeze VM in memory                |
+| `dexbox vm suspend [name]`   | Save state to disk and power off   |
+| `dexbox vm resume [name]`    | Resume from pause or suspend       |
+| `dexbox vm status [name]`    | Show VM state and guest additions  |
+| `dexbox vm destroy [name]`   | Delete VM and disk                 |
 
-For sensitive inputs (passwords, tokens), use `SecureValue` so the secret never enters the sandbox:
+If `[name]` is omitted and exactly one VM exists, it is used automatically.
 
-```python
-from dexbox import Computer, SecureValue
-
-computer = Computer()
-computer.type(SecureValue("my_password"))  # resolved server-side
-```
-
-Pass secure params when running:
+### Tool action commands
 
 ```bash
-dexbox run examples/login-secure.py --secure-params '{"my_password": "hunter2"}'
+dexbox run --type computer --action screenshot > shot.png
+dexbox run --type computer --action left_click --coordinate 500,300
+dexbox run --type computer --action type --text "hello"
+dexbox run --type computer --action key --text "ctrl+a"
+dexbox run --type bash --command "dir"
+dexbox run --type text_editor --command view --path "C:\file.txt"
+dexbox run --type text_editor --command create --path "C:\file.txt" --file-text "content"
 ```
+
+## Multi-Model Support
+
+Adding support for a new model family requires implementing one `ModelAdapter` interface:
+
+```go
+type ModelAdapter interface {
+    ToolDefinitions(capabilities []string, display DisplayConfig) []json.RawMessage
+    ParseToolCall(raw json.RawMessage) (*CanonicalAction, error)
+    FormatResult(action *CanonicalAction, result *CanonicalResult) (json.RawMessage, error)
+}
+```
+
+Built-in adapters: Anthropic (`claude-*`), OpenAI (`gpt-*`, `o1-*`, `o3-*`), Gemini (`gemini-*`).
 
 ## Environment Variables
 
-### Required
+| Variable                   | Default                 | Description              |
+| -------------------------- | ----------------------- | ------------------------ |
+| `DEXBOX_VM_USER`           | `dexbox`                | Guest OS username        |
+| `DEXBOX_VM_PASS`           | `dexbox123`             | Guest OS password        |
+| `DEXBOX_SOAP_ADDR`         | `http://localhost:18083` | vboxwebsrv endpoint     |
+| `DEXBOX_SHARED_DIR`        | `~/.dexbox/shared`      | Host-side shared folder  |
+| `DEXBOX_LISTEN`            | `:8600`                 | Server listen address    |
+| `DEXBOX_SCREENSHOT_WIDTH`  | `1024`                  | Screenshot resize width  |
+| `DEXBOX_SCREENSHOT_HEIGHT` | `768`                   | Screenshot resize height |
 
-| Variable            | Description                           |
-| ------------------- | ------------------------------------- |
-| `ANTHROPIC_API_KEY` | **Required.** Your Anthropic API key. |
-
-### Optional
-
-| Variable                     | Default                        | Description                                                   |
-| ---------------------------- | ------------------------------ | ------------------------------------------------------------- |
-| `DEXBOX_MODEL`               | `claude-haiku-4-5-20251001`    | LLM model to use.                                             |
-| `DRIVE_PATHS`                | `/mnt/tmp`                     | Comma-separated container host paths accessible to workflows. |
-| `DEXBOX_SANDBOX_IMAGE`       | `dexbox-sandbox-python:latest` | Sandbox container image.                                      |
-| `DEXBOX_SANDBOX_PULL_POLICY` | `never`                        | `never` or `always`.                                          |
-| `DEXBOX_SANDBOX_TIMEOUT`     | `600`                          | Max workflow duration (seconds).                              |
-| `DEXBOX_BACKEND`             | `linux-desktop`                | Desktop backend strategy (`linux-desktop` or `rdp`).          |
-| `RDP_HOST`                   | —                              | RDP server hostname. Required if `DEXBOX_BACKEND=rdp`.        |
-| `RDP_USERNAME`               | —                              | Username for RDP. Required if `DEXBOX_BACKEND=rdp`.           |
-| `RDP_PASSWORD`               | —                              | Password for RDP. Required if `DEXBOX_BACKEND=rdp`.           |
-| `RDP_SECURITY`               | —                              | Security protocol for RDP (e.g. `rdp`, `tls`, `nla`).         |
-| `RDP_RETRY_DELAY_SECONDS`    | `60`                           | Minimum seconds between RDP reconnect attempts.               |
-
-### Using a `.env` file
-
-The `dexbox` CLI automatically loads environment variables from a `.env` file in the current directory if it exists.
-
-If you want to load environment variables from a different file, use the `-e` or `--env-file` flag:
-
-```bash
-dexbox -e test.env run examples/open-browser.py
-```
-
-Alternatively, you can manually export them in your current shell session:
-
-```bash
-set -a; source test.env; set +a
-dexbox run examples/open-browser.py
-```
-
-## Examples
-
-See the [`examples/`](examples/) directory:
-
-- [`extract-data.py`](examples/extract-data.py) — Extract structured data
-- [`fill-form.py`](examples/fill-form.py) — Fill out a web form
-- [`download-files.py`](examples/download-files.py) — Download files to Drive
-
-## Testing
-
-You can run the full test suite (both Python unit tests and Go integration tests) using `make`:
-
-```bash
-make test # requires uv
-```
-
-### Python Unit Tests
-
-The unit tests validate the Python SDK/runtime logic and can be run independently:
-
-```bash
-make test-python
-```
-
-### Go Integration Tests
-
-The integration tests validate the `dexbox` CLI and the orchestration of the LLM Sandbox. **You must have the desktop container running before executing the integration tests:**
-
-```bash
-dexbox start          # Or docker compose up -d
-make test-integration # Run the integration tests (runs headlessly with --no-browser)
-```
-
-## Development
-
-```bash
-# Lint
-make lint
-```
+The CLI loads a `.env` file from the current directory automatically. Use `--env-file` to specify a different path.
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    Agent["AI Agent\n(Claude · GPT · Gemini)"]
+    CLI["dexbox CLI"]
+
+    subgraph dexbox["dexbox"]
+        Server["Tool Server\n:8600"]
+        Tools["Tools\nscreenshot · mouse · keyboard\nbash · file I/O"]
+        VBox["VirtualBox Layer\nVM lifecycle"]
+    end
+
+    subgraph VM["Windows 11 VM"]
+        GuestAdditions["Guest Additions"]
+    end
+
+    Agent -- "HTTP" --> Server
+    CLI --> Server
+    CLI --> VBox
+    Server --> Tools
+    Tools --> VBox
+    VBox --> GuestAdditions
 ```
-dexbox CLI (Go)
-    │
-    └─► POST /run ──► dexbox container (Go Server)
-                            │
-                            ├─ Debian desktop (Xvfb + openbox)
-                            ├─ VNC server (TigerVNC) or RDP client (xfreerdp)
-                            ├─ Screen recording (FFmpeg)
-                            │
-                            └─► sandbox container (Docker sibling)
-                                    │
-                                    ├─ runs workflow.py via harness
-                                    └─► RPC back to parent (keyboard, mouse, VLM)
+
+### Package overview
+
+```
+internal/
+├── vbox/
+│   ├── cli.go          VBoxManage CLI wrapper
+│   ├── soap.go         SOAP client for mouse control
+│   ├── scancodes.go    PS/2 scancode table
+│   ├── manager.go      VM lifecycle orchestration
+│   ├── install.go      Provisioning logic
+│   └── autounattend.xml  Windows answer file (embedded)
+├── tools/
+│   ├── computer.go     Screenshot, keyboard, mouse via VBox
+│   ├── bash.go         PowerShell via Guest Additions
+│   ├── editor.go       File I/O via shared folders
+│   ├── adapter.go      ModelAdapter interface + registry
+│   ├── adapter_anthropic.go
+│   ├── adapter_openai.go
+│   └── adapter_gemini.go
+├── server/
+│   └── server.go       HTTP tool server
+├── config/
+│   └── config.go       Environment configuration
+└── logger/
+    └── logger.go       JSONL log rendering
 ```
 
 ## License
