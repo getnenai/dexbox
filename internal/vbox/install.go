@@ -23,9 +23,11 @@ var autounattendXML []byte
 
 const (
 	isoURL         = "https://software-static.download.prss.microsoft.com/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/22631.2428.231001-0608.23H2_NI_RELEASE_SVC_REFRESH_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso"
+	virtioISOURL   = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
 	isoCacheDir    = ".dexbox/iso"
 	isoFilename    = "Win11_Enterprise_Eval.iso"
 	isoFilenameARM = "Win11_ARM_Enterprise_Eval.iso"
+	virtioFilename = "virtio-win.iso"
 )
 
 // Install runs the full provisioning flow: install VirtualBox, download ISO, create VM.
@@ -147,8 +149,91 @@ func ensureVirtualBox() error {
 	}
 }
 
+var downloadClient = &http.Client{Timeout: 30 * time.Minute}
+
+// downloadFile downloads url to destPath with progress output and SHA256 logging.
+// It writes to a temporary file first, then atomically renames on success.
+func downloadFile(ctx context.Context, url, destPath, displayName string) error {
+	dir := filepath.Dir(destPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	fmt.Printf("Downloading %s...\n", displayName)
+	fmt.Printf("  URL: %s\n", url)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := downloadClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d downloading %s", resp.StatusCode, displayName)
+	}
+
+	tmpPath := destPath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		f.Close()
+		os.Remove(tmpPath)
+	}()
+
+	total := resp.ContentLength
+	hash := sha256.New()
+	writer := io.MultiWriter(f, hash)
+
+	var written int64
+	buf := make([]byte, 32*1024)
+	lastReport := time.Now()
+
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, wErr := writer.Write(buf[:n]); wErr != nil {
+				return wErr
+			}
+			written += int64(n)
+
+			if time.Since(lastReport) > 2*time.Second {
+				if total > 0 {
+					pct := float64(written) / float64(total) * 100
+					fmt.Printf("  %.1f%% (%d / %d MB)\n", pct, written/(1024*1024), total/(1024*1024))
+				} else {
+					fmt.Printf("  %d MB downloaded\n", written/(1024*1024))
+				}
+				lastReport = time.Now()
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+
+	f.Close()
+
+	fmt.Printf("  SHA256: %s\n", hex.EncodeToString(hash.Sum(nil)))
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return err
+	}
+
+	fmt.Printf("  Saved to %s\n", destPath)
+	return nil
+}
+
 func ensureISO(ctx context.Context, providedPath string) (string, error) {
-	// If caller supplied a path, verify it exists and use it directly.
 	if providedPath != "" {
 		if _, err := os.Stat(providedPath); err != nil {
 			return "", fmt.Errorf("provided ISO not found: %w", err)
@@ -165,7 +250,6 @@ func ensureISO(ctx context.Context, providedPath string) (string, error) {
 	cacheDir := filepath.Join(home, isoCacheDir)
 
 	// On ARM hosts there is no stable auto-download URL for the Windows 11 ARM ISO.
-	// Check for a manually-cached copy; if absent, explain where to get it.
 	if nativeArch() == "arm64" {
 		cachedPath := filepath.Join(cacheDir, isoFilenameARM)
 		if _, err := os.Stat(cachedPath); err == nil {
@@ -177,96 +261,40 @@ func ensureISO(ctx context.Context, providedPath string) (string, error) {
 				"Download it from:\n\n"+
 				"  https://www.microsoft.com/en-us/software-download/windows11arm64\n\n"+
 				"Then run:\n\n"+
-				"  dexbox create vm w11 --iso ~/Downloads/Win11_25H2_English_Arm64.iso\n\n"+
+				"  dexbox create vm w11 --iso /path/to/Win11_ARM64.iso\n\n"+
 				"Or save it to: %s", cachedPath,
 		)
 	}
 
 	isoPath := filepath.Join(cacheDir, isoFilename)
-
-	// Check if ISO already exists
 	if _, err := os.Stat(isoPath); err == nil {
 		fmt.Printf("ISO already cached at %s\n", isoPath)
 		return isoPath, nil
 	}
 
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	if err := downloadFile(ctx, isoURL, isoPath, "Windows 11 Enterprise Eval ISO"); err != nil {
 		return "", err
 	}
+	return isoPath, nil
+}
 
-	fmt.Printf("Downloading Windows 11 Enterprise Eval ISO...\n")
-	fmt.Printf("  URL: %s\n", isoURL)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", isoURL, nil)
+// ensureVirtioISO downloads the virtio-win ISO (for ARM VMs that need the
+// NetKVM virtio network driver) and caches it in ~/.dexbox/iso/.
+func ensureVirtioISO(ctx context.Context) (string, error) {
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	isoPath := filepath.Join(home, isoCacheDir, virtioFilename)
+	if _, err := os.Stat(isoPath); err == nil {
+		fmt.Printf("virtio-win ISO already cached at %s\n", isoPath)
+		return isoPath, nil
+	}
+
+	if err := downloadFile(ctx, virtioISOURL, isoPath, "virtio-win ISO (ARM network drivers)"); err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d downloading ISO", resp.StatusCode)
-	}
-
-	tmpPath := isoPath + ".tmp"
-	f, err := os.Create(tmpPath)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		f.Close()
-		os.Remove(tmpPath)
-	}()
-
-	// Progress tracking
-	total := resp.ContentLength
-	hash := sha256.New()
-	writer := io.MultiWriter(f, hash)
-
-	var written int64
-	buf := make([]byte, 32*1024)
-	lastReport := time.Now()
-
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			if _, wErr := writer.Write(buf[:n]); wErr != nil {
-				return "", wErr
-			}
-			written += int64(n)
-
-			if time.Since(lastReport) > 2*time.Second {
-				if total > 0 {
-					pct := float64(written) / float64(total) * 100
-					fmt.Printf("  %.1f%% (%d / %d MB)\n", pct, written/(1024*1024), total/(1024*1024))
-				} else {
-					fmt.Printf("  %d MB downloaded\n", written/(1024*1024))
-				}
-				lastReport = time.Now()
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", err
-		}
-	}
-
-	f.Close()
-
-	checksum := hex.EncodeToString(hash.Sum(nil))
-	fmt.Printf("  SHA256: %s\n", checksum)
-
-	if err := os.Rename(tmpPath, isoPath); err != nil {
-		return "", err
-	}
-
-	fmt.Printf("  Saved to %s\n", isoPath)
 	return isoPath, nil
 }
 
@@ -299,6 +327,35 @@ func unattendedInstall(ctx context.Context, vmName, isoPath string) error {
 		xmlData = bytes.ReplaceAll(xmlData,
 			[]byte(`VBoxWindowsAdditions.exe`),
 			[]byte(`VBoxWindowsAdditions-arm64.exe`),
+		)
+
+		// Inject virtio-win driver paths so Windows PE loads the NetKVM
+		// network driver during setup. Multiple drive letters are listed
+		// because the virtio ISO letter is assigned dynamically.
+		virtioComponent := `
+        <component name="Microsoft-Windows-PnpCustomizationsWinPE" processorArchitecture="arm64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <DriverPaths>
+                <PathAndCredentials wcm:action="add" wcm:keyValue="1">
+                    <Path>D:\NetKVM\w11\ARM64</Path>
+                </PathAndCredentials>
+                <PathAndCredentials wcm:action="add" wcm:keyValue="2">
+                    <Path>E:\NetKVM\w11\ARM64</Path>
+                </PathAndCredentials>
+                <PathAndCredentials wcm:action="add" wcm:keyValue="3">
+                    <Path>F:\NetKVM\w11\ARM64</Path>
+                </PathAndCredentials>
+                <PathAndCredentials wcm:action="add" wcm:keyValue="4">
+                    <Path>G:\NetKVM\w11\ARM64</Path>
+                </PathAndCredentials>
+                <PathAndCredentials wcm:action="add" wcm:keyValue="5">
+                    <Path>H:\NetKVM\w11\ARM64</Path>
+                </PathAndCredentials>
+            </DriverPaths>
+        </component>`
+		xmlData = bytes.Replace(xmlData,
+			[]byte(`    </settings>`),
+			[]byte(virtioComponent+"\n    </settings>"),
+			1, // only the first </settings> = end of windowsPE pass
 		)
 	}
 
@@ -347,6 +404,20 @@ func unattendedInstall(ctx context.Context, vmName, isoPath string) error {
 		"--storagectl", "SATA", "--port", "3", "--device", "0",
 		"--type", "dvddrive", "--medium", gaISO); err != nil {
 		return fmt.Errorf("attach Guest Additions ISO: %w", err)
+	}
+
+	// On ARM, attach the virtio-win ISO to SATA port 4 so Windows PE can
+	// load the NetKVM network driver during installation.
+	if nativeArch() == "arm64" {
+		virtioISO, err := ensureVirtioISO(ctx)
+		if err != nil {
+			return fmt.Errorf("virtio-win ISO: %w", err)
+		}
+		if _, err := RunVBoxManage(ctx, "storageattach", vmName,
+			"--storagectl", "SATA", "--port", "4", "--device", "0",
+			"--type", "dvddrive", "--medium", virtioISO); err != nil {
+			return fmt.Errorf("attach virtio-win ISO: %w", err)
+		}
 	}
 
 	return nil

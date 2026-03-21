@@ -222,10 +222,11 @@ func CreateVM(ctx context.Context, name string, cfg VMConfig) error {
 		return fmt.Errorf("modifyvm: %w", err)
 	}
 
-	// Create storage controller (4 ports: disk, Windows ISO, autounattend ISO, Guest Additions ISO)
+	// Create storage controller (5 ports: disk, Windows ISO, autounattend ISO,
+	// Guest Additions ISO, and optionally virtio-win ISO on ARM)
 	if _, err := RunVBoxManage(ctx, "storagectl", name,
 		"--name", "SATA", "--add", "sata", "--controller", "IntelAhci",
-		"--portcount", "4"); err != nil {
+		"--portcount", "5"); err != nil {
 		return fmt.Errorf("storagectl: %w", err)
 	}
 
