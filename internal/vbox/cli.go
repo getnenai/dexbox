@@ -272,7 +272,17 @@ func setupEFIBootDVD(ctx context.Context, vmName string) error {
 	}
 	sysProps, _ := RunVBoxManage(ctx, "list", "systemproperties")
 	nvramPath := filepath.Join(parseMachineFolder(sysProps), vmName, vmName+".nvram")
-	return patchNVRAMForDVDBoot(nvramPath)
+	if err := patchNVRAMForDVDBoot(nvramPath); err != nil {
+		return err
+	}
+	// Verify the variables were written by listing them.
+	out, err := RunVBoxManage(ctx, "modifynvram", vmName, "listvars")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not verify NVRAM variables: %v\n", err)
+	} else {
+		fmt.Printf("NVRAM boot variables after patching:\n%s\n", out)
+	}
+	return nil
 }
 
 // AttachISO attaches an ISO to the VM's SATA controller.

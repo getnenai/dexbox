@@ -84,6 +84,20 @@
         <component name="Microsoft-Windows-TerminalServices-LocalSessionManager" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
             <fDenyTSConnections>false</fDenyTSConnections>
         </component>
+        <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+            <RunSynchronous>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <Path>reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0 /f</Path>
+                    <Description>Disable UAC so Guest Additions can install silently</Description>
+                </RunSynchronousCommand>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>2</Order>
+                    <Path>cmd /c for %d in (D E F G H) do if exist %d:\SetupComplete.cmd (mkdir C:\Windows\Setup\Scripts &amp; copy /Y %d:\SetupComplete.cmd C:\Windows\Setup\Scripts\SetupComplete.cmd)</Path>
+                    <Description>Copy GA install script from autounattend ISO for post-setup execution</Description>
+                </RunSynchronousCommand>
+            </RunSynchronous>
+        </component>
     </settings>
     <settings pass="oobeSystem">
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
@@ -124,23 +138,7 @@
                 <VerticalResolution>768</VerticalResolution>
                 <RefreshRate>60</RefreshRate>
             </Display>
-            <FirstLogonCommands>
-                <SynchronousCommand wcm:action="add">
-                    <Order>1</Order>
-                    <CommandLine>cmd.exe /c for %%d in (D E F G H) do if exist %%d:\VBoxWindowsAdditions.exe %%d:\cert\VBoxCertUtil.exe add-trusted-publisher %%d:\cert\vbox-sha1.cer %%d:\cert\vbox-sha256.cer</CommandLine>
-                    <Description>Trust VirtualBox certificates for silent driver install</Description>
-                </SynchronousCommand>
-                <SynchronousCommand wcm:action="add">
-                    <Order>2</Order>
-                    <CommandLine>cmd.exe /c for %%d in (D E F G H) do if exist %%d:\VBoxWindowsAdditions.exe %%d:\VBoxWindowsAdditions.exe /S</CommandLine>
-                    <Description>Install VirtualBox Guest Additions silently</Description>
-                </SynchronousCommand>
-                <SynchronousCommand wcm:action="add">
-                    <Order>3</Order>
-                    <CommandLine>cmd.exe /c shutdown /r /t 0</CommandLine>
-                    <Description>Reboot to activate Guest Additions</Description>
-                </SynchronousCommand>
-            </FirstLogonCommands>
+
         </component>
         <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
             <InputLocale>en-US</InputLocale>

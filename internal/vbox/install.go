@@ -261,7 +261,7 @@ func ensureISO(ctx context.Context, providedPath string) (string, error) {
 				"Download it from:\n\n"+
 				"  https://www.microsoft.com/en-us/software-download/windows11arm64\n\n"+
 				"Then run:\n\n"+
-				"  dexbox create vm w11 --iso /path/to/Win11_ARM64.iso\n\n"+
+				"  dexbox create vm <name> --iso /path/to/Windows11_ARM64.iso\n\n"+
 				"Or save it to: %s", cachedPath,
 		)
 	}
@@ -322,13 +322,6 @@ func unattendedInstall(ctx context.Context, vmName, isoPath string) error {
 			[]byte(`processorArchitecture="amd64"`),
 			[]byte(`processorArchitecture="arm64"`),
 		)
-		// The x86 VBoxWindowsAdditions.exe stub doesn't run on ARM64 Windows.
-		// Use the ARM64-specific installer instead.
-		xmlData = bytes.ReplaceAll(xmlData,
-			[]byte(`VBoxWindowsAdditions.exe`),
-			[]byte(`VBoxWindowsAdditions-arm64.exe`),
-		)
-
 		// Inject virtio-win driver paths so Windows PE loads the NetKVM
 		// network driver during setup. Multiple drive letters are listed
 		// because the virtio ISO letter is assigned dynamically.
@@ -371,6 +364,43 @@ func unattendedInstall(ctx context.Context, vmName, isoPath string) error {
 		return err
 	}
 
+	// Generate SetupComplete.cmd — Windows runs this as SYSTEM after setup
+	// completes but before the first user logon. Much more reliable than
+	// FirstLogonCommands on Windows 11 ARM, where a race condition with
+	// driver initialization causes FirstLogonCommands to silently fail.
+	certTool := `for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha1.cer %%d:\cert\VBoxCertUtil.exe add-trusted-publisher %%d:\cert\vbox-sha1.cer %%d:\cert\vbox-sha256.cer`
+	gaExe := "VBoxWindowsAdditions.exe"
+	if nativeArch() == "arm64" {
+		// Native certutil instead of x86 VBoxCertUtil; arm64 installer name.
+		certTool = `for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha1.cer certutil.exe -addstore TrustedPublisher %%d:\cert\vbox-sha1.cer
+for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addstore TrustedPublisher %%d:\cert\vbox-sha256.cer`
+		gaExe = "VBoxWindowsAdditions-arm64.exe"
+	}
+	setupScript := fmt.Sprintf("@echo off\r\n"+
+		"%s\r\n"+
+		"REM Wait for ARM drivers to finish initializing\r\n"+
+		"timeout /t 10 /nobreak\r\n"+
+		"for %%%%d in (D E F G H) do if exist %%%%d:\\%s %%%%d:\\%s /S\r\n"+
+		"shutdown /r /t 30\r\n",
+		certTool, gaExe, gaExe)
+	if err := os.WriteFile(filepath.Join(stageDir, "SetupComplete.cmd"), []byte(setupScript), 0o644); err != nil {
+		return err
+	}
+
+	// On ARM, add a startup.nsh EFI shell script as a fallback. If the
+	// NVRAM boot entry is missing or invalid, OVMF drops to the EFI shell
+	// which auto-runs startup.nsh after a short timeout. The script scans
+	// all attached filesystems for the ARM64 boot loader.
+	if nativeArch() == "arm64" {
+		startupNsh := "echo Searching for Windows installer...\r\n"
+		for i := 0; i <= 5; i++ {
+			startupNsh += fmt.Sprintf("if exist fs%d:\\EFI\\BOOT\\bootaa64.efi then\r\n  fs%d:\\EFI\\BOOT\\bootaa64.efi\r\nendif\r\n", i, i)
+		}
+		if err := os.WriteFile(filepath.Join(stageDir, "startup.nsh"), []byte(startupNsh), 0o644); err != nil {
+			return err
+		}
+	}
+
 	// Create the ISO in the same cache directory as the Windows ISO so it
 	// persists for the duration of the installation.
 	isoDir := filepath.Join(home, isoCacheDir)
@@ -394,8 +424,14 @@ func unattendedInstall(ctx context.Context, vmName, isoPath string) error {
 		return fmt.Errorf("attach autounattend ISO: %w", err)
 	}
 
-	// Attach Guest Additions ISO to SATA port 3 so the unattended answer
-	// file can silently install them on first logon.
+	// Attach Guest Additions ISO to SATA port 3 so SetupComplete.cmd
+	// can silently install them after Windows setup finishes.
+	// Defensively ensure port count is at least 5 (ports 0-4) — VMs
+	// created with older code may have fewer ports configured.
+	if _, err := RunVBoxManage(ctx, "storagectl", vmName,
+		"--name", "SATA", "--portcount", "5"); err != nil {
+		return fmt.Errorf("set SATA port count: %w", err)
+	}
 	gaISO, err := GuestAdditionsISOPath()
 	if err != nil {
 		return fmt.Errorf("guest additions: %w", err)
@@ -463,37 +499,25 @@ func waitForInstallation(ctx context.Context, vmName string) error {
 	defer ticker.Stop()
 
 	timeout := time.After(45 * time.Minute)
-	consecutiveRunning := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-timeout:
-			return fmt.Errorf("timeout waiting for installation to complete")
+			return fmt.Errorf(
+				"timeout waiting for Guest Additions to become active.\n"+
+					"Troubleshooting:\n"+
+					"  1. Verify the GA ISO is attached: VBoxManage showvminfo %s --machinereadable | grep SATA-3\n"+
+					"  2. Check the VM log: ~/VirtualBox VMs/%s/Logs/VBox.log\n"+
+					"  3. Try a manual GA install inside the VM",
+				vmName, vmName)
 		case <-ticker.C:
 			if GuestAdditionsReady(ctx, vmName) {
 				fmt.Println("Guest Additions active - installation complete!")
 				return nil
 			}
-			if guestOSReady(ctx, vmName) {
-				fmt.Println("Guest OS responding - installation complete!")
-				return nil
-			}
 			state, _ := VMState(ctx, vmName)
-			if state == "running" {
-				consecutiveRunning++
-			} else {
-				consecutiveRunning = 0
-			}
-			// If the VM has been running steadily for ~10 minutes without
-			// reboots, the OS has likely finished installing. Guest Additions
-			// may not reach RunLevel 2 on all platforms (e.g. ARM).
-			if consecutiveRunning >= 20 {
-				fmt.Println("VM running steadily - installation appears complete.")
-				fmt.Println("Note: Guest Additions may not be fully active; some features may be limited.")
-				return nil
-			}
-			fmt.Printf("  VM state: %s, waiting...\n", state)
+			fmt.Printf("  VM state: %s, GA not ready, waiting...\n", state)
 		}
 	}
 }
