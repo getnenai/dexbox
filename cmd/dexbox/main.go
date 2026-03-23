@@ -14,6 +14,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -79,17 +81,23 @@ func cmdStart() *cobra.Command {
 		Use:   "start",
 		Short: "Start dexbox server and vboxwebsrv",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Start vboxwebsrv in background
+			port := parseSoapPort()
+
+			// Run vboxwebsrv as a foreground child so Go owns the real PID
+			// and can kill it reliably on shutdown.
 			fmt.Println("Starting vboxwebsrv...")
-			vboxwebsrv := exec.Command("vboxwebsrv", "--background", "--host", "localhost", "--port", "18083")
+			vboxwebsrv := exec.Command("vboxwebsrv", "--host", "localhost", "--port", port)
 			vboxwebsrv.Stdout = os.Stdout
 			vboxwebsrv.Stderr = os.Stderr
 			if err := vboxwebsrv.Start(); err != nil {
 				return fmt.Errorf("failed to start vboxwebsrv: %w", err)
 			}
 
-			// Give it a moment to bind
-			time.Sleep(1 * time.Second)
+			// Poll until vboxwebsrv is actually listening.
+			if err := waitForPort(port, 10*time.Second); err != nil {
+				_ = vboxwebsrv.Process.Kill()
+				return fmt.Errorf("vboxwebsrv failed to start: %w", err)
+			}
 
 			fmt.Println("Starting dexbox server...")
 			srv := server.New(server.Options{
@@ -102,7 +110,6 @@ func cmdStart() *cobra.Command {
 				SharedDir:  config.SharedDir,
 			})
 
-			// Handle shutdown signals
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 
@@ -111,15 +118,34 @@ func cmdStart() *cobra.Command {
 				errCh <- srv.Run()
 			}()
 
-			select {
-			case err := <-errCh:
-				return err
-			case <-ctx.Done():
-				fmt.Println("\nShutting down...")
-				// Kill vboxwebsrv
-				if vboxwebsrv.Process != nil {
+			// Detect if vboxwebsrv dies while we're running.
+			vboxDied := make(chan error, 1)
+			go func() {
+				vboxDied <- vboxwebsrv.Wait()
+			}()
+
+			// Helper to shut down vboxwebsrv gracefully with a timeout.
+			stopVBox := func() {
+				_ = vboxwebsrv.Process.Signal(syscall.SIGTERM)
+				select {
+				case <-vboxDied:
+				case <-time.After(5 * time.Second):
 					_ = vboxwebsrv.Process.Kill()
 				}
+			}
+
+			select {
+			case err := <-errCh:
+				stopVBox()
+				return err
+			case err := <-vboxDied:
+				if err != nil {
+					return fmt.Errorf("vboxwebsrv exited unexpectedly: %w", err)
+				}
+				return fmt.Errorf("vboxwebsrv exited unexpectedly")
+			case <-ctx.Done():
+				fmt.Println("\nShutting down...")
+				stopVBox()
 				return nil
 			}
 		},
@@ -136,12 +162,47 @@ func cmdStop() *cobra.Command {
 		Short: "Stop dexbox server and vboxwebsrv",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Println("Stopping vboxwebsrv...")
-			// Kill vboxwebsrv by name
 			_ = exec.Command("pkill", "-f", "vboxwebsrv").Run()
-			fmt.Println("Stopped.")
+
+			// Verify the process actually died.
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if exec.Command("pgrep", "-f", "vboxwebsrv").Run() != nil {
+					fmt.Println("Stopped.")
+					return nil
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+
+			// Force kill if still alive.
+			_ = exec.Command("pkill", "-9", "-f", "vboxwebsrv").Run()
+			fmt.Println("Force stopped.")
 			return nil
 		},
 	}
+}
+
+// parseSoapPort extracts the port number from config.SOAPAddr (e.g. "http://localhost:18083").
+func parseSoapPort() string {
+	u, err := url.Parse(config.SOAPAddr)
+	if err != nil || u.Port() == "" {
+		return "18083"
+	}
+	return u.Port()
+}
+
+// waitForPort polls until a TCP connection to localhost:port succeeds or the timeout expires.
+func waitForPort(port string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", "localhost:"+port, 500*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("port %s not ready after %s", port, timeout)
 }
 
 // ---------------------------------------------------------------------------
