@@ -64,6 +64,19 @@ Then reload:
 source ~/.zshrc
 ```
 
+## Agent
+
+A TypeScript agent (AI SDK + Claude) that connects to the dexbox tool server. Tool definitions are fetched dynamically from `GET /tools` at startup, so the agent has zero hardcoded knowledge of what actions exist.
+
+Requires a running dexbox instance (`dexbox start`).
+
+```bash
+cd agent
+npm install
+cp .env.example .env  # add your ANTHROPIC_API_KEY
+npx tsx src/index.ts "Take a screenshot of the desktop"
+```
+
 ## How It Works
 
 Dexbox is a **tool server**, not an agent. Your AI agent framework calls the HTTP API with tool actions in the model's native format. Dexbox parses, executes, and returns results — zero translation needed on your side.
@@ -276,6 +289,7 @@ flowchart LR
 ### Package overview
 
 ```
+agent/                    Mastra TypeScript agent (AI SDK + dexbox HTTP API)
 internal/
 ├── vbox/
 │   ├── cli.go          VBoxManage CLI wrapper

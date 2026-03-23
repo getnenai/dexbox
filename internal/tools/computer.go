@@ -41,7 +41,8 @@ func (t *ComputerTool) Execute(ctx context.Context, action *CanonicalAction) (*C
 		return nil, fmt.Errorf("invalid computer params: %w", err)
 	}
 
-	switch p.Action {
+	// action.Action is set by the adapter (not in Params), so use it directly.
+	switch action.Action {
 	case "screenshot":
 		return t.screenshot(ctx)
 	case "left_click":
@@ -65,7 +66,7 @@ func (t *ComputerTool) Execute(ctx context.Context, action *CanonicalAction) (*C
 	case "cursor_position":
 		return &CanonicalResult{Coordinate: [2]int{t.cursorX, t.cursorY}}, nil
 	default:
-		return nil, fmt.Errorf("unknown computer action %q", p.Action)
+		return nil, fmt.Errorf("unknown computer action %q", action.Action)
 	}
 }
 
