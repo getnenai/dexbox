@@ -65,7 +65,7 @@ func (s *Server) Run() error {
 	startTime := time.Now()
 
 	// Tool routes
-	mux.HandleFunc("/tools", s.handleGetTools)
+	mux.HandleFunc("/tools", s.handleGetToolSchema)
 	mux.HandleFunc("/actions", s.handleAction)
 	mux.HandleFunc("/actions/batch", s.handleBatchAction)
 
@@ -87,26 +87,13 @@ func (s *Server) Run() error {
 
 // --- Tool routes ---
 
-func (s *Server) handleGetTools(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleGetToolSchema(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-
-	modelID := r.URL.Query().Get("model")
-	adapter, err := tools.AdapterForModel(modelID)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error":              "unknown_model",
-			"message":            fmt.Sprintf("Unknown model %q", modelID),
-			"supported_prefixes": tools.SupportedPrefixes(),
-		})
-		return
-	}
-
-	caps := []string{"computer", "bash", "text_editor"}
-	defs := adapter.ToolDefinitions(caps, s.display)
-	writeJSON(w, http.StatusOK, defs)
+	schemas := tools.AllToolSchemas(s.display)
+	writeJSON(w, http.StatusOK, schemas)
 }
 
 func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
@@ -472,9 +459,12 @@ func (s *Server) executeAction(r *http.Request, vmName string, action *tools.Can
 		}
 		return ct.Execute(r.Context(), action)
 	case "bash":
+		var p tools.BashParams
+		if err := action.UnmarshalParams(&p); err != nil {
+			return nil, fmt.Errorf("invalid bash params: %w", err)
+		}
 		bt := s.getBashTool(vmName)
-		command, _ := action.Params["command"].(string)
-		out, err := bt.Execute(r.Context(), command, 2*time.Minute)
+		out, err := bt.Execute(r.Context(), p.Command, 2*time.Minute)
 		if err != nil {
 			return nil, err
 		}

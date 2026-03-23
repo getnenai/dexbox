@@ -36,31 +36,36 @@ func NewComputerTool(vmName string, width, height int, soap *vbox.SOAPClient) *C
 
 // Execute dispatches a canonical computer action.
 func (t *ComputerTool) Execute(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
-	switch action.Action {
+	var p ComputerParams
+	if err := action.UnmarshalParams(&p); err != nil {
+		return nil, fmt.Errorf("invalid computer params: %w", err)
+	}
+
+	switch p.Action {
 	case "screenshot":
 		return t.screenshot(ctx)
 	case "left_click":
-		return t.click(ctx, action, 1)
+		return t.click(ctx, p.Coordinate, 1)
 	case "right_click":
-		return t.click(ctx, action, 2)
+		return t.click(ctx, p.Coordinate, 2)
 	case "middle_click":
-		return t.click(ctx, action, 4)
+		return t.click(ctx, p.Coordinate, 4)
 	case "double_click":
-		return t.doubleClick(ctx, action)
+		return t.doubleClick(ctx, p.Coordinate)
 	case "type":
-		return t.typeText(ctx, action)
+		return t.typeText(ctx, p.Text)
 	case "key":
-		return t.key(ctx, action)
+		return t.key(ctx, p.Text)
 	case "mouse_move":
-		return t.mouseMove(ctx, action)
+		return t.mouseMove(ctx, p.Coordinate)
 	case "scroll":
-		return t.scroll(ctx, action)
+		return t.scroll(ctx, p.Coordinate, p.Direction, p.Amount)
 	case "left_click_drag":
-		return t.drag(ctx, action)
+		return t.drag(ctx, p.StartCoordinate, p.Coordinate)
 	case "cursor_position":
 		return &CanonicalResult{Coordinate: [2]int{t.cursorX, t.cursorY}}, nil
 	default:
-		return nil, fmt.Errorf("unknown computer action %q", action.Action)
+		return nil, fmt.Errorf("unknown computer action %q", p.Action)
 	}
 }
 
@@ -79,40 +84,36 @@ func (t *ComputerTool) screenshot(ctx context.Context) (*CanonicalResult, error)
 	return &CanonicalResult{Image: resized}, nil
 }
 
-func (t *ComputerTool) click(ctx context.Context, action *CanonicalAction, buttonMask int) (*CanonicalResult, error) {
-	x, y, err := extractCoordinate(action)
-	if err != nil {
-		return nil, err
+func (t *ComputerTool) click(ctx context.Context, coord *[2]int, buttonMask int) (*CanonicalResult, error) {
+	if coord == nil {
+		return nil, fmt.Errorf("field 'coordinate' required for click action")
 	}
-	t.cursorX, t.cursorY = x, y
+	t.cursorX, t.cursorY = coord[0], coord[1]
 
-	if err := t.soap.MouseClick(x, y, buttonMask); err != nil {
-		return nil, err
-	}
-	return &CanonicalResult{}, nil
-}
-
-func (t *ComputerTool) doubleClick(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
-	x, y, err := extractCoordinate(action)
-	if err != nil {
-		return nil, err
-	}
-	t.cursorX, t.cursorY = x, y
-
-	if err := t.soap.MouseDoubleClick(x, y, 1); err != nil {
+	if err := t.soap.MouseClick(coord[0], coord[1], buttonMask); err != nil {
 		return nil, err
 	}
 	return &CanonicalResult{}, nil
 }
 
-func (t *ComputerTool) typeText(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
-	text, _ := action.Params["text"].(string)
+func (t *ComputerTool) doubleClick(ctx context.Context, coord *[2]int) (*CanonicalResult, error) {
+	if coord == nil {
+		return nil, fmt.Errorf("field 'coordinate' required for double_click action")
+	}
+	t.cursorX, t.cursorY = coord[0], coord[1]
+
+	if err := t.soap.MouseDoubleClick(coord[0], coord[1], 1); err != nil {
+		return nil, err
+	}
+	return &CanonicalResult{}, nil
+}
+
+func (t *ComputerTool) typeText(ctx context.Context, text string) (*CanonicalResult, error) {
 	if text == "" {
 		return nil, fmt.Errorf("field 'text' required for action 'type'")
 	}
 
 	codes := vbox.TextToScancodes(text)
-	// Send in batches to avoid oversized VBoxManage argument lists.
 	const batchSize = 60
 	for i := 0; i < len(codes); i += batchSize {
 		end := i + batchSize
@@ -129,8 +130,7 @@ func (t *ComputerTool) typeText(ctx context.Context, action *CanonicalAction) (*
 	return &CanonicalResult{}, nil
 }
 
-func (t *ComputerTool) key(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
-	text, _ := action.Params["text"].(string)
+func (t *ComputerTool) key(ctx context.Context, text string) (*CanonicalResult, error) {
 	if text == "" {
 		return nil, fmt.Errorf("field 'text' required for action 'key'")
 	}
@@ -142,65 +142,55 @@ func (t *ComputerTool) key(ctx context.Context, action *CanonicalAction) (*Canon
 	return &CanonicalResult{}, nil
 }
 
-func (t *ComputerTool) mouseMove(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
-	x, y, err := extractCoordinate(action)
-	if err != nil {
-		return nil, err
+func (t *ComputerTool) mouseMove(ctx context.Context, coord *[2]int) (*CanonicalResult, error) {
+	if coord == nil {
+		return nil, fmt.Errorf("field 'coordinate' required for mouse_move action")
 	}
-	t.cursorX, t.cursorY = x, y
+	t.cursorX, t.cursorY = coord[0], coord[1]
 
-	if err := t.soap.MouseMoveAbsolute(x, y); err != nil {
+	if err := t.soap.MouseMoveAbsolute(coord[0], coord[1]); err != nil {
 		return nil, err
 	}
 	return &CanonicalResult{}, nil
 }
 
-func (t *ComputerTool) scroll(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
-	x, y, err := extractCoordinate(action)
-	if err != nil {
-		return nil, err
+func (t *ComputerTool) scroll(ctx context.Context, coord *[2]int, direction string, amount int) (*CanonicalResult, error) {
+	if coord == nil {
+		return nil, fmt.Errorf("field 'coordinate' required for scroll action")
 	}
-	t.cursorX, t.cursorY = x, y
+	t.cursorX, t.cursorY = coord[0], coord[1]
 
-	// Default scroll amount
-	dz := 3
-	if v, ok := action.Params["amount"].(float64); ok {
-		dz = int(v)
+	dz := amount
+	if dz == 0 {
+		dz = 3
 	}
 
-	// Direction: negative dz = scroll down in VBox convention
-	dir, _ := action.Params["direction"].(string)
-	switch dir {
+	switch direction {
 	case "down", "":
 		dz = -dz
 	case "up":
 		// dz stays positive
 	default:
-		return nil, fmt.Errorf("invalid scroll direction %q; expected 'up' or 'down'", dir)
+		return nil, fmt.Errorf("invalid scroll direction %q; expected 'up' or 'down'", direction)
 	}
 
-	if err := t.soap.MouseScroll(x, y, dz); err != nil {
+	if err := t.soap.MouseScroll(coord[0], coord[1], dz); err != nil {
 		return nil, err
 	}
 	return &CanonicalResult{}, nil
 }
 
-func (t *ComputerTool) drag(ctx context.Context, action *CanonicalAction) (*CanonicalResult, error) {
-	startCoord, ok := action.Params["start_coordinate"].([]any)
-	if !ok || len(startCoord) < 2 {
+func (t *ComputerTool) drag(ctx context.Context, start, end *[2]int) (*CanonicalResult, error) {
+	if start == nil {
 		return nil, fmt.Errorf("field 'start_coordinate' required for action 'left_click_drag'")
 	}
-	endCoord, ok := action.Params["coordinate"].([]any)
-	if !ok || len(endCoord) < 2 {
+	if end == nil {
 		return nil, fmt.Errorf("field 'coordinate' required for action 'left_click_drag'")
 	}
 
-	sx := toInt(startCoord[0])
-	sy := toInt(startCoord[1])
-	ex := toInt(endCoord[0])
-	ey := toInt(endCoord[1])
+	sx, sy := start[0], start[1]
+	ex, ey := end[0], end[1]
 
-	// Press at start
 	if err := t.soap.MouseDown(sx, sy, 1); err != nil {
 		return nil, err
 	}
@@ -213,13 +203,11 @@ func (t *ComputerTool) drag(ctx context.Context, action *CanonicalAction) (*Cano
 	}()
 	time.Sleep(100 * time.Millisecond)
 
-	// Move to end
 	if err := t.soap.MouseMoveAbsolute(ex, ey); err != nil {
 		return nil, err
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	// Release
 	if err := t.soap.MouseUp(ex, ey); err != nil {
 		return nil, err
 	}
@@ -227,29 +215,6 @@ func (t *ComputerTool) drag(ctx context.Context, action *CanonicalAction) (*Cano
 
 	t.cursorX, t.cursorY = ex, ey
 	return &CanonicalResult{}, nil
-}
-
-// --- Helpers ---
-
-func extractCoordinate(action *CanonicalAction) (int, int, error) {
-	coord, ok := action.Params["coordinate"].([]any)
-	if !ok || len(coord) < 2 {
-		return 0, 0, fmt.Errorf("field 'coordinate' required for action %q", action.Action)
-	}
-	return toInt(coord[0]), toInt(coord[1]), nil
-}
-
-func toInt(v any) int {
-	switch n := v.(type) {
-	case float64:
-		return int(n)
-	case int:
-		return n
-	case int64:
-		return int(n)
-	default:
-		return 0
-	}
 }
 
 // resizePNG decodes a PNG, resizes it to target dimensions, and re-encodes.

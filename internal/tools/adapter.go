@@ -21,6 +21,15 @@ type CanonicalResult struct {
 	Coordinate [2]int `json:"coordinate,omitempty"` // cursor position
 }
 
+// UnmarshalParams converts the generic Params map into a typed struct.
+func (a *CanonicalAction) UnmarshalParams(dest any) error {
+	data, err := json.Marshal(a.Params)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, dest)
+}
+
 // DisplayConfig describes the VM display dimensions.
 type DisplayConfig struct {
 	Width  int `json:"width"`

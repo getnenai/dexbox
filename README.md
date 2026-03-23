@@ -69,18 +69,18 @@ source ~/.zshrc
 Dexbox is a **tool server**, not an agent. Your AI agent framework calls the HTTP API with tool actions in the model's native format. Dexbox parses, executes, and returns results — zero translation needed on your side.
 
 ```
-Your Agent Framework
-  │  1. GET /tools?model=claude-sonnet-4-5-20250929  →  tool definitions
-  │  2. Pass definitions + instruction to Claude
-  │  3. Claude returns a tool call
+Your Agent Framework (AI SDK, LangChain, Mastra, etc.)
+  │  1. GET /tools  →  JSON Schema for all tools
+  │  2. Build SDK tool definitions from schema
+  │  3. Model returns a tool call
   │  4. POST /actions?model=claude-sonnet-4-5-20250929  →  forward raw tool call
-  │  5. Dexbox executes, returns result in Claude's format
+  │  5. Dexbox executes, returns result in the model's format
   v
 Dexbox Tool Server (:8600)
-  ├── /tools       →  tool definitions in any model's native format
-  ├── /actions     →  execute a tool action
-  ├── /actions/batch  →  batch sequential actions
-  ├── /vm          →  VM lifecycle (create, start, stop, pause, resume, destroy)
+  ├── /tools  →  model-agnostic JSON Schema for all tools
+  ├── /actions       →  execute a tool action (model-specific format)
+  ├── /actions/batch →  batch sequential actions
+  ├── /vm            →  VM lifecycle (create, start, stop, pause, resume, destroy)
   └── /health
          │
          ├── computer  →  VBoxManage (screenshots, scancodes) + SOAP (mouse)
@@ -93,20 +93,15 @@ Dexbox Tool Server (:8600)
 
 ## API
 
-### Get tool definitions
+### Get tool schemas
 
-Returns tool definitions formatted for the specified model. The agent framework passes these directly to the model with no modification.
+Returns model-agnostic JSON Schema for all tools. SDKs use this to dynamically build tool definitions instead of hardcoding them.
 
 ```bash
-# Claude
-curl 'localhost:8600/tools?model=claude-sonnet-4-5-20250929'
-
-# OpenAI
-curl 'localhost:8600/tools?model=gpt-4o'
-
-# Gemini
-curl 'localhost:8600/tools?model=gemini-2.0-flash'
+curl localhost:8600/tools
 ```
+
+Response includes full parameter schemas with types, enums, descriptions, and required fields for each tool (computer, bash, text_editor).
 
 ### Execute a tool action
 
@@ -179,7 +174,7 @@ curl -X DELETE localhost:8600/vm/my-vm
 
 ```json
 400  {"error": "bad_request",    "message": "field 'coordinate' required for action 'left_click'"}
-400  {"error": "unknown_model",  "message": "Unknown model 'foo'", "supported_prefixes": ["claude-","gpt-","gemini-"]}
+400  {"error": "unknown_model",  "message": "Unknown model 'foo'", "supported_prefixes": ["claude-","gpt-","o1-","o3-","gemini-"]}
 404  {"error": "vm_not_found",   "message": "VM 'foobar' does not exist"}
 409  {"error": "vm_exists",      "message": "VM 'my-vm' already exists"}
 502  {"error": "vm_unavailable", "message": "VM 'my-vm' is not running"}
@@ -290,6 +285,7 @@ internal/
 │   ├── install.go      Provisioning logic
 │   └── autounattend.xml  Windows answer file (embedded)
 ├── tools/
+│   ├── schema.go       Typed param structs + JSON Schema generator
 │   ├── computer.go     Screenshot, keyboard, mouse via VBox
 │   ├── bash.go         PowerShell via Guest Additions
 │   ├── editor.go       File I/O via shared folders
