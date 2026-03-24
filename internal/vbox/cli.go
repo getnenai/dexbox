@@ -82,6 +82,14 @@ func ControlVM(ctx context.Context, vmName, action string) error {
 	return err
 }
 
+// SetVideoMode sets the VM display resolution via Guest Additions.
+// Requires Guest Additions to be running (RunLevel >= 2).
+func SetVideoMode(ctx context.Context, vmName string, width, height, bpp int) error {
+	_, err := RunVBoxManage(ctx, "controlvm", vmName, "setvideomodehint",
+		fmt.Sprintf("%d", width), fmt.Sprintf("%d", height), fmt.Sprintf("%d", bpp))
+	return err
+}
+
 // VMState returns the current state of the VM (e.g. "running", "poweroff", "paused", "saved").
 func VMState(ctx context.Context, vmName string) (string, error) {
 	out, err := RunVBoxManage(ctx, "showvminfo", vmName, "--machinereadable")

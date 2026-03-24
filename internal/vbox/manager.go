@@ -202,9 +202,25 @@ func (m *Manager) List(ctx context.Context) ([]VMStatus, error) {
 }
 
 // ConnectSOAP establishes a SOAP session for a running VM.
+// If a session already exists, it is reused. Use ReconnectSOAP to force a
+// fresh session (e.g. after a VM reboot invalidates object references).
 func (m *Manager) ConnectSOAP(ctx context.Context, vmName string) error {
 	if _, ok := m.sessions[vmName]; ok {
 		return nil // Already connected
+	}
+	return m.reconnectSOAP(vmName)
+}
+
+// ReconnectSOAP tears down any existing SOAP session and establishes a fresh one.
+// Call this when a VM has rebooted and SOAP object references are stale.
+func (m *Manager) ReconnectSOAP(ctx context.Context, vmName string) error {
+	return m.reconnectSOAP(vmName)
+}
+
+func (m *Manager) reconnectSOAP(vmName string) error {
+	if old, ok := m.sessions[vmName]; ok {
+		_ = old.Disconnect()
+		delete(m.sessions, vmName)
 	}
 	soap := NewSOAPClient(m.soapEndpoint)
 	if err := soap.Connect(vmName, m.soapUser, m.soapPass); err != nil {

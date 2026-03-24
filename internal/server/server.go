@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/getnenai/dexbox/internal/tools"
@@ -23,6 +24,7 @@ type Server struct {
 	shared  string
 
 	// Per-VM tool instances (lazily created)
+	mu        sync.RWMutex
 	computers map[string]*tools.ComputerTool
 	bashes    map[string]*tools.BashTool
 	editors   map[string]*tools.EditorTool
@@ -457,7 +459,20 @@ func (s *Server) executeAction(r *http.Request, vmName string, action *tools.Can
 		if err != nil {
 			return nil, err
 		}
-		return ct.Execute(r.Context(), action)
+		result, err := ct.Execute(r.Context(), action)
+		if err != nil && strings.Contains(err.Error(), "Invalid managed object reference") {
+			// SOAP session is stale (e.g. VM rebooted). Reconnect and retry once.
+			log.Printf("SOAP session stale for VM %q, reconnecting...", vmName)
+			if reconnErr := s.reconnectComputerTool(r, vmName); reconnErr != nil {
+				return nil, fmt.Errorf("reconnect failed: %w (original: %v)", reconnErr, err)
+			}
+			ct, err = s.getComputerTool(r, vmName)
+			if err != nil {
+				return nil, err
+			}
+			return ct.Execute(r.Context(), action)
+		}
+		return result, err
 	case "bash":
 		var p tools.BashParams
 		if err := action.UnmarshalParams(&p); err != nil {
@@ -478,34 +493,68 @@ func (s *Server) executeAction(r *http.Request, vmName string, action *tools.Can
 }
 
 func (s *Server) getComputerTool(r *http.Request, vmName string) (*tools.ComputerTool, error) {
+	s.mu.RLock()
 	if ct, ok := s.computers[vmName]; ok {
+		s.mu.RUnlock()
 		return ct, nil
 	}
+	s.mu.RUnlock()
+
 	if s.manager.SOAPClient(vmName) == nil {
 		if err := s.manager.ConnectSOAP(r.Context(), vmName); err != nil {
 			return nil, fmt.Errorf("SOAP connect failed: %w", err)
 		}
 	}
+
+	// Sync VM display resolution to match the tool's coordinate space.
+	// This ensures Claude's click coordinates map 1:1 to VM pixels.
+	if err := vbox.SetVideoMode(r.Context(), vmName, s.display.Width, s.display.Height, 32); err != nil {
+		log.Printf("Warning: failed to set VM display resolution to %dx%d: %v", s.display.Width, s.display.Height, err)
+	}
+
 	ct := tools.NewComputerTool(vmName, s.display.Width, s.display.Height, s.manager.SOAPClient(vmName))
+	s.mu.Lock()
 	s.computers[vmName] = ct
+	s.mu.Unlock()
 	return ct, nil
 }
 
+// reconnectComputerTool forces a fresh SOAP session and invalidates the cached tool.
+// The caller should use getComputerTool to rebuild it (which also runs SetVideoMode).
+func (s *Server) reconnectComputerTool(r *http.Request, vmName string) error {
+	s.mu.Lock()
+	delete(s.computers, vmName)
+	s.mu.Unlock()
+	return s.manager.ReconnectSOAP(r.Context(), vmName)
+}
+
 func (s *Server) getBashTool(vmName string) *tools.BashTool {
+	s.mu.RLock()
 	if bt, ok := s.bashes[vmName]; ok {
+		s.mu.RUnlock()
 		return bt
 	}
+	s.mu.RUnlock()
+
 	bt := tools.NewBashTool(vmName, s.vmUser, s.vmPass)
+	s.mu.Lock()
 	s.bashes[vmName] = bt
+	s.mu.Unlock()
 	return bt
 }
 
 func (s *Server) getEditorTool(vmName string) *tools.EditorTool {
+	s.mu.RLock()
 	if et, ok := s.editors[vmName]; ok {
+		s.mu.RUnlock()
 		return et
 	}
+	s.mu.RUnlock()
+
 	et := tools.NewEditorTool(vmName, s.vmUser, s.vmPass, s.shared)
+	s.mu.Lock()
 	s.editors[vmName] = et
+	s.mu.Unlock()
 	return et
 }
 
