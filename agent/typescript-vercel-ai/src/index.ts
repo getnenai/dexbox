@@ -1,4 +1,10 @@
-import "dotenv/config";
+import { config } from "dotenv";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
+
+// Load .env from the agent/ directory (two levels up from src/)
+const __dirname = dirname(fileURLToPath(import.meta.url));
+config({ path: resolve(__dirname, "..", "..", ".env") });
 import { runClaude } from "./runners/claude.js";
 import { runLux } from "./runners/lux.js";
 

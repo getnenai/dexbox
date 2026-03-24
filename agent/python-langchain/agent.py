@@ -1,16 +1,17 @@
 """Dexbox LangChain Agent — computer-use agent loop with Claude.
 
 Run with:
-    cd langchain-agent && uv run python agent.py
+    make agent-py-lc-run
 
 Requires:
     - dexbox server running (dexbox start)
-    - ANTHROPIC_API_KEY set in .env or environment
+    - ANTHROPIC_API_KEY set in root .env or environment
 """
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
@@ -18,7 +19,9 @@ from langchain.agents import create_agent
 from client import DEXBOX_MODEL, fetch_tool_schemas, health_check
 from tools import build_tools_from_schema
 
-load_dotenv()
+# Load .env from the agent/ directory (one level up from python-langchain/)
+_AGENT_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(_AGENT_DIR / ".env")
 
 SYSTEM_PROMPT = """\
 You are a computer-use agent controlling a Windows VM through dexbox.

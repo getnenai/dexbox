@@ -45,7 +45,6 @@ def _build_pydantic_model(name: str, parameters: dict):
     fields = {}
     for field_name, prop in properties.items():
         python_type = _json_schema_type_to_python(prop)
-        description = prop.get("description", "")
 
         if field_name in required:
             # Required field — no default
@@ -82,6 +81,7 @@ def _make_tool_fn(tool_name: str):
         # resolution. Image tokens are based on dimensions (~2K), not file size.
         if tool_name == "computer" and body.get("action") == "screenshot":
             from io import BytesIO
+
             from PIL import Image
 
             png_bytes = call_dexbox_raw(body)
