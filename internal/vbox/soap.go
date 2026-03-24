@@ -20,6 +20,11 @@ type SOAPClient struct {
 	consoleRef  string // IConsole reference
 	mouseRef    string // IMouse reference
 	keyboardRef string // IKeyboard reference
+
+	// Stored for automatic reconnection when object references expire.
+	vmName   string
+	soapUser string
+	soapPass string
 }
 
 // NewSOAPClient creates a SOAP client pointed at the vboxwebsrv endpoint.
@@ -78,6 +83,13 @@ func (c *SOAPClient) Connect(vmName, user, pass string) error {
 	}
 	c.keyboardRef = keyboardRef
 
+	// Store credentials for automatic reconnection only after all refs
+	// are successfully acquired, so a failed Connect doesn't leave stale
+	// metadata from a partial handshake.
+	c.vmName = vmName
+	c.soapUser = user
+	c.soapPass = pass
+
 	return nil
 }
 
@@ -100,16 +112,20 @@ func (c *SOAPClient) Disconnect() error {
 
 // MouseMoveAbsolute moves the mouse to absolute coordinates.
 func (c *SOAPClient) MouseMoveAbsolute(x, y int) error {
-	return c.putMouseEventAbsolute(c.mouseRef, x, y, 0, 0, 0)
+	return c.withReconnect(func() error {
+		return c.putMouseEventAbsolute(c.mouseRef, x, y, 0, 0, 0)
+	})
 }
 
 // MouseClick moves to (x,y), presses button, waits, and releases.
 func (c *SOAPClient) MouseClick(x, y, buttonMask int) error {
-	if err := c.putMouseEventAbsolute(c.mouseRef, x, y, 0, 0, buttonMask); err != nil {
-		return err
-	}
-	time.Sleep(50 * time.Millisecond)
-	return c.putMouseEventAbsolute(c.mouseRef, x, y, 0, 0, 0)
+	return c.withReconnect(func() error {
+		if err := c.putMouseEventAbsolute(c.mouseRef, x, y, 0, 0, buttonMask); err != nil {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
+		return c.putMouseEventAbsolute(c.mouseRef, x, y, 0, 0, 0)
+	})
 }
 
 // MouseDoubleClick performs two rapid clicks.
@@ -123,20 +139,26 @@ func (c *SOAPClient) MouseDoubleClick(x, y, buttonMask int) error {
 
 // MouseScroll moves to (x,y) then sends vertical scroll.
 func (c *SOAPClient) MouseScroll(x, y, dz int) error {
-	if err := c.putMouseEventAbsolute(c.mouseRef, x, y, 0, 0, 0); err != nil {
-		return err
-	}
-	return c.putMouseEvent(c.mouseRef, 0, 0, dz, 0, 0)
+	return c.withReconnect(func() error {
+		if err := c.putMouseEventAbsolute(c.mouseRef, x, y, 0, 0, 0); err != nil {
+			return err
+		}
+		return c.putMouseEvent(c.mouseRef, 0, 0, dz, 0, 0)
+	})
 }
 
 // MouseDown presses the button at (x,y) without releasing.
 func (c *SOAPClient) MouseDown(x, y, buttonMask int) error {
-	return c.putMouseEventAbsolute(c.mouseRef, x, y, 0, 0, buttonMask)
+	return c.withReconnect(func() error {
+		return c.putMouseEventAbsolute(c.mouseRef, x, y, 0, 0, buttonMask)
+	})
 }
 
 // MouseUp releases all buttons at (x,y).
 func (c *SOAPClient) MouseUp(x, y int) error {
-	return c.putMouseEventAbsolute(c.mouseRef, x, y, 0, 0, 0)
+	return c.withReconnect(func() error {
+		return c.putMouseEventAbsolute(c.mouseRef, x, y, 0, 0, 0)
+	})
 }
 
 // --- SOAP call implementations ---
@@ -247,16 +269,18 @@ func (c *SOAPClient) KeyboardPutScancodes(hexCodes []string) error {
 	if len(hexCodes) == 0 {
 		return nil
 	}
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`<IKeyboard_putScancodes xmlns="http://www.virtualbox.org/"><_this>%s</_this>`, c.keyboardRef))
-	for _, h := range hexCodes {
-		var v int64
-		fmt.Sscanf(h, "%x", &v)
-		sb.WriteString(fmt.Sprintf("<scancodes>%d</scancodes>", v))
-	}
-	sb.WriteString("</IKeyboard_putScancodes>")
-	_, err := c.call("IKeyboard_putScancodes", sb.String())
-	return err
+	return c.withReconnect(func() error {
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf(`<IKeyboard_putScancodes xmlns="http://www.virtualbox.org/"><_this>%s</_this>`, c.keyboardRef))
+		for _, h := range hexCodes {
+			var v int64
+			fmt.Sscanf(h, "%x", &v)
+			sb.WriteString(fmt.Sprintf("<scancodes>%d</scancodes>", v))
+		}
+		sb.WriteString("</IKeyboard_putScancodes>")
+		_, err := c.call("IKeyboard_putScancodes", sb.String())
+		return err
+	})
 }
 
 func (c *SOAPClient) putMouseEventAbsolute(mouseRef string, x, y, dz, dw, buttonState int) error {
@@ -283,6 +307,30 @@ func (c *SOAPClient) putMouseEvent(mouseRef string, dx, dy, dz, dw, buttonState 
 	</IMouse_putMouseEvent>`, mouseRef, dx, dy, dz, dw, buttonState)
 	_, err := c.call("IMouse_putMouseEvent", body)
 	return err
+}
+
+// reconnect tears down the current session and re-establishes it.
+func (c *SOAPClient) reconnect() error {
+	_ = c.Disconnect()
+	return c.Connect(c.vmName, c.soapUser, c.soapPass)
+}
+
+// isStaleRefError returns true if the error indicates an expired SOAP object reference.
+func isStaleRefError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Invalid managed object reference")
+}
+
+// withReconnect runs fn, and if it fails with a stale reference error,
+// reconnects the SOAP session and retries once.
+func (c *SOAPClient) withReconnect(fn func() error) error {
+	err := fn()
+	if !isStaleRefError(err) || c.vmName == "" {
+		return err
+	}
+	if reconnErr := c.reconnect(); reconnErr != nil {
+		return fmt.Errorf("reconnect after stale ref failed: %w (original: %v)", reconnErr, err)
+	}
+	return fn()
 }
 
 // call sends a SOAP request and returns the raw response body.

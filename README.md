@@ -66,15 +66,30 @@ source ~/.zshrc
 
 ## Agent
 
-A TypeScript agent (AI SDK + Claude) that connects to the dexbox tool server. Tool definitions are fetched dynamically from `GET /tools` at startup, so the agent has zero hardcoded knowledge of what actions exist.
+A TypeScript agent that connects to the dexbox tool server. Supports multiple models:
+
+- **Claude Sonnet 4.6** (default) — AI SDK tool-use loop
+- **Lux Actor** (`lux-actor-1`) — OpenAGI vision-action loop (fast)
+- **Lux Thinker** (`lux-thinker-1`) — OpenAGI vision-action loop (complex tasks)
 
 Requires a running dexbox instance (`dexbox start`).
 
 ```bash
 cd agent
 npm install
-cp .env.example .env  # add your ANTHROPIC_API_KEY
+cp .env.example .env  # add your ANTHROPIC_API_KEY and/or OAGI_API_KEY
+
+# Claude (default)
 npx tsx src/index.ts "Take a screenshot of the desktop"
+
+# Claude (explicit)
+npx tsx src/index.ts --model claude "Take a screenshot of the desktop"
+
+# Lux Actor
+npx tsx src/index.ts --model lux-actor-1 "Open Edge and go to google.com"
+
+# Lux Thinker
+npx tsx src/index.ts --model lux-thinker-1 "Find the weather in San Francisco"
 ```
 
 ## How It Works

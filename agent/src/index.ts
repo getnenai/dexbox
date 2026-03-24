@@ -1,41 +1,64 @@
 import "dotenv/config";
-import { generateText, stepCountIs } from "ai";
-import { anthropic } from "@ai-sdk/anthropic";
-import { loadTools } from "./tools/loader.js";
+import { runClaude } from "./runners/claude.js";
+import { runLux } from "./runners/lux.js";
 
-const SYSTEM_PROMPT = `You are a computer-use agent controlling a Windows 11 virtual machine.
+const LUX_MODELS = ["lux-actor-1", "lux-thinker-1"] as const;
+type LuxModel = (typeof LUX_MODELS)[number];
 
-You have three tools:
-- computerTool: Take screenshots, click, type, scroll, and drag on the VM screen.
-- bashTool: Run PowerShell commands on the guest (not Linux bash, use PowerShell syntax).
-- text_editorTool: View and edit files on the guest using Windows paths.
+function isLuxModel(m: string): m is LuxModel {
+  return LUX_MODELS.includes(m as LuxModel);
+}
 
-Guidelines:
-- Always start by taking a screenshot to see the current state of the desktop.
-- After every significant action (click, type, command), take a screenshot to verify the result.
-- Prefer PowerShell (bashTool) for tasks that can be done programmatically, it is faster and more reliable than GUI interaction.
-- Use Windows file paths (e.g. C:\\Users\\dexbox\\Desktop\\file.txt).
-- For GUI interaction, identify UI elements from screenshots and click their coordinates precisely.
-- If an action does not produce the expected result, try an alternative approach.
-- When the task is complete, summarize what was accomplished.`;
+function parseArgs(): { model: string; prompt: string } {
+  const args = process.argv.slice(2);
+  let model = "claude";
+
+  const modelIdx = args.indexOf("--model");
+  if (modelIdx !== -1) {
+    const modelValue = args[modelIdx + 1];
+    if (!modelValue || modelValue.startsWith("--")) {
+      console.error("Missing value for --model");
+      process.exit(1);
+    }
+    model = modelValue;
+    args.splice(modelIdx, 2);
+  }
+
+  const prompt = args.join(" ");
+  return { model, prompt };
+}
 
 async function main() {
-  const prompt = process.argv.slice(2).join(" ");
+  const { model, prompt } = parseArgs();
+
   if (!prompt) {
-    console.error("Usage: npx tsx src/index.ts <prompt>");
     console.error(
-      'Example: npx tsx src/index.ts "Take a screenshot of the desktop"'
+      "Usage: npx tsx src/index.ts [--model claude|lux-actor-1|lux-thinker-1] <prompt>"
     );
     process.exit(1);
   }
 
-  if (!process.env.ANTHROPIC_API_KEY) {
+  // Validate model
+  if (model !== "claude" && !isLuxModel(model)) {
+    console.error(
+      `Unknown model: ${model}. Use: claude, ${LUX_MODELS.join(", ")}`
+    );
+    process.exit(1);
+  }
+
+  // Validate API keys
+  if (model === "claude" && !process.env.ANTHROPIC_API_KEY) {
     console.error(
       "ANTHROPIC_API_KEY is not set. Create a .env file from .env.example."
     );
     process.exit(1);
   }
+  if (isLuxModel(model) && !process.env.OAGI_API_KEY) {
+    console.error("OAGI_API_KEY is not set. Add it to your .env file.");
+    process.exit(1);
+  }
 
+  // Check dexbox connectivity
   const baseUrl = process.env.DEXBOX_URL || "http://localhost:8600";
   try {
     const health = await fetch(`${baseUrl}/health`);
@@ -48,41 +71,15 @@ async function main() {
     process.exit(1);
   }
 
-  // Load tool definitions dynamically from the dexbox server.
-  const tools = await loadTools();
-  console.log(`Loaded tools: ${Object.keys(tools).join(", ")}`);
-  console.log(`Running: "${prompt}"\n`);
-
-  const result = await generateText({
-    model: anthropic("claude-sonnet-4-6") as any,
-    tools,
-    stopWhen: stepCountIs(30),
-    system: SYSTEM_PROMPT,
-    prompt,
-    onStepFinish: ({ toolCalls, toolResults, text }: any) => {
-      if (toolCalls?.length) {
-        for (const tc of toolCalls) {
-          const input = JSON.stringify(tc.input ?? tc.args, null, 2);
-          console.log(`  [call] ${tc.toolName}: ${input}`);
-        }
-      }
-      if (toolResults?.length) {
-        for (const tr of toolResults) {
-          const out = tr.output ?? tr.result;
-          const preview = out?.base64_image
-            ? `<screenshot ${out.base64_image.length} chars>`
-            : JSON.stringify(out).slice(0, 200);
-          console.log(`  [result] ${tr.toolName}: ${preview}`);
-        }
-      }
-      if (text) {
-        console.log(`  [text] ${text.slice(0, 200)}`);
-      }
-    },
-  });
+  let result: string;
+  if (model === "claude") {
+    result = await runClaude(prompt);
+  } else {
+    result = await runLux(prompt, model as LuxModel);
+  }
 
   console.log("\n--- Result ---");
-  console.log(result.text);
+  console.log(result);
 }
 
 main().catch((err) => {

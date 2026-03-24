@@ -2,11 +2,10 @@ const DEXBOX_URL = process.env.DEXBOX_URL || "http://localhost:8600";
 const DEXBOX_VM = process.env.DEXBOX_VM || "";
 
 export async function callDexbox(
-  action: Record<string, unknown>
+  action: Record<string, unknown>,
+  model: string = "claude-sonnet-4-6"
 ): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({
-    model: "claude-sonnet-4-20250514",
-  });
+  const params = new URLSearchParams({ model });
   if (DEXBOX_VM) {
     params.set("vm", DEXBOX_VM);
   }
