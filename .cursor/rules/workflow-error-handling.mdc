@@ -1,1 +1,0 @@
-../../.agents/rules/workflow-error-handling.mdc

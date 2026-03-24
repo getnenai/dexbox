@@ -1,1 +1,0 @@
-../../.agents/rules/workflow-guide-comprehensive.mdc

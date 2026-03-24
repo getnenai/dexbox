@@ -14,13 +14,3 @@ The following is a list of direct dependencies and their respective licenses:
 | `github.com/spf13/cobra`            | Apache 2.0 | [Repo](https://github.com/spf13/cobra)            |
 | `github.com/tidwall/gjson`          | MIT        | [Repo](https://github.com/tidwall/gjson)          |
 
-## Python Dependencies
-
-| Package     | License      | Repository                                                 |
-| ----------- | ------------ | ---------------------------------------------------------- |
-| `anthropic` | MIT          | [Repo](https://github.com/anthropics/anthropic-sdk-python) |
-| `fastapi`   | MIT          | [Repo](https://github.com/tiangolo/fastapi)                |
-| `uvicorn`   | BSD-3-Clause | [Repo](https://github.com/encode/uvicorn)                  |
-| `httpx`     | BSD-3-Clause | [Repo](https://github.com/encode/httpx)                    |
-| `pydantic`  | MIT          | [Repo](https://github.com/pydantic/pydantic)               |
-| `docker`    | Apache 2.0   | [Repo](https://github.com/docker/docker-py)                |

@@ -28,9 +28,7 @@ var (
 
 	// Component colors (mapped dynamically)
 	compColors = map[string]lipgloss.Color{
-		"sandbox": lipgloss.Color("86"),  // cyan
-		"python":  lipgloss.Color("118"), // green
-		"server":  lipgloss.Color("75"),  // blue
+		"server": lipgloss.Color("75"), // blue
 		// fallback will use 246 (light gray)
 	}
 )
@@ -82,7 +80,7 @@ func RenderLogLine(raw string) string {
 	// Determine component color
 	compColor, exists := compColors[shortName]
 	if !exists {
-		// Handle sub-components like "python:browser"
+		// Handle sub-components
 		baseName := strings.Split(shortName, ":")[0]
 		if c, ok := compColors[baseName]; ok {
 			compColor = c

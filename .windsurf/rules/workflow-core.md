@@ -1,1 +1,0 @@
-../../.agents/rules/workflow-core.mdc
