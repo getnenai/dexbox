@@ -16,12 +16,14 @@ import (
 // ComputerTool executes computer-use actions (screenshot, keyboard, mouse)
 // against a VirtualBox VM.
 type ComputerTool struct {
-	vmName  string
-	width   int
-	height  int
-	soap    *vbox.SOAPClient
-	cursorX int
-	cursorY int
+	vmName   string
+	width    int // screenshot target dimensions (what the model sees)
+	height   int
+	soap     *vbox.SOAPClient
+	cursorX  int
+	cursorY  int
+	displayW int // actual VM display dimensions (what SOAP uses), set on first screenshot
+	displayH int
 }
 
 // NewComputerTool creates a computer tool bound to a specific VM.
@@ -76,13 +78,29 @@ func (t *ComputerTool) screenshot(ctx context.Context) (*CanonicalResult, error)
 		return nil, err
 	}
 
-	resized, err := resizePNG(raw, t.width, t.height)
+	resized, srcW, srcH, err := resizePNG(raw, t.width, t.height)
 	if err != nil {
-		// If resize fails, return original
 		resized = raw
+	} else {
+		t.displayW = srcW
+		t.displayH = srcH
 	}
 
 	return &CanonicalResult{Image: resized}, nil
+}
+
+// scaleCoord maps coordinates from screenshot space to VM display space.
+func (t *ComputerTool) scaleCoord(coord *[2]int) *[2]int {
+	if coord == nil || t.displayW == 0 || t.displayH == 0 {
+		return coord
+	}
+	if t.displayW == t.width && t.displayH == t.height {
+		return coord
+	}
+	return &[2]int{
+		coord[0] * t.displayW / t.width,
+		coord[1] * t.displayH / t.height,
+	}
 }
 
 func (t *ComputerTool) click(ctx context.Context, coord *[2]int, buttonMask int) (*CanonicalResult, error) {
@@ -90,8 +108,9 @@ func (t *ComputerTool) click(ctx context.Context, coord *[2]int, buttonMask int)
 		return nil, fmt.Errorf("field 'coordinate' required for click action")
 	}
 	t.cursorX, t.cursorY = coord[0], coord[1]
+	sc := t.scaleCoord(coord)
 
-	if err := t.soap.MouseClick(coord[0], coord[1], buttonMask); err != nil {
+	if err := t.soap.MouseClick(sc[0], sc[1], buttonMask); err != nil {
 		return nil, err
 	}
 	return &CanonicalResult{}, nil
@@ -102,8 +121,9 @@ func (t *ComputerTool) doubleClick(ctx context.Context, coord *[2]int) (*Canonic
 		return nil, fmt.Errorf("field 'coordinate' required for double_click action")
 	}
 	t.cursorX, t.cursorY = coord[0], coord[1]
+	sc := t.scaleCoord(coord)
 
-	if err := t.soap.MouseDoubleClick(coord[0], coord[1], 1); err != nil {
+	if err := t.soap.MouseDoubleClick(sc[0], sc[1], 1); err != nil {
 		return nil, err
 	}
 	return &CanonicalResult{}, nil
@@ -148,8 +168,9 @@ func (t *ComputerTool) mouseMove(ctx context.Context, coord *[2]int) (*Canonical
 		return nil, fmt.Errorf("field 'coordinate' required for mouse_move action")
 	}
 	t.cursorX, t.cursorY = coord[0], coord[1]
+	sc := t.scaleCoord(coord)
 
-	if err := t.soap.MouseMoveAbsolute(coord[0], coord[1]); err != nil {
+	if err := t.soap.MouseMoveAbsolute(sc[0], sc[1]); err != nil {
 		return nil, err
 	}
 	return &CanonicalResult{}, nil
@@ -160,6 +181,7 @@ func (t *ComputerTool) scroll(ctx context.Context, coord *[2]int, direction stri
 		return nil, fmt.Errorf("field 'coordinate' required for scroll action")
 	}
 	t.cursorX, t.cursorY = coord[0], coord[1]
+	sc := t.scaleCoord(coord)
 
 	dz := amount
 	if dz == 0 {
@@ -175,7 +197,7 @@ func (t *ComputerTool) scroll(ctx context.Context, coord *[2]int, direction stri
 		return nil, fmt.Errorf("invalid scroll direction %q; expected 'up' or 'down'", direction)
 	}
 
-	if err := t.soap.MouseScroll(coord[0], coord[1], dz); err != nil {
+	if err := t.soap.MouseScroll(sc[0], sc[1], dz); err != nil {
 		return nil, err
 	}
 	return &CanonicalResult{}, nil
@@ -189,8 +211,13 @@ func (t *ComputerTool) drag(ctx context.Context, start, end *[2]int) (*Canonical
 		return nil, fmt.Errorf("field 'coordinate' required for action 'left_click_drag'")
 	}
 
-	sx, sy := start[0], start[1]
-	ex, ey := end[0], end[1]
+	// Keep original end coords for cursor tracking (screenshot space).
+	t.cursorX, t.cursorY = end[0], end[1]
+
+	ss := t.scaleCoord(start)
+	se := t.scaleCoord(end)
+	sx, sy := ss[0], ss[1]
+	ex, ey := se[0], se[1]
 
 	if err := t.soap.MouseDown(sx, sy, 1); err != nil {
 		return nil, err
@@ -213,21 +240,22 @@ func (t *ComputerTool) drag(ctx context.Context, start, end *[2]int) (*Canonical
 		return nil, err
 	}
 	success = true
-
-	t.cursorX, t.cursorY = ex, ey
 	return &CanonicalResult{}, nil
 }
 
-// resizePNG decodes a PNG, resizes it to target dimensions, and re-encodes.
-func resizePNG(data []byte, width, height int) ([]byte, error) {
+// resizePNG decodes a PNG, resizes it to target dimensions, re-encodes it,
+// and returns the original source dimensions alongside the resized bytes.
+func resizePNG(data []byte, width, height int) (resized []byte, srcW, srcH int, err error) {
 	src, err := png.Decode(bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 
 	srcBounds := src.Bounds()
-	if srcBounds.Dx() == width && srcBounds.Dy() == height {
-		return data, nil // Already the right size
+	srcW, srcH = srcBounds.Dx(), srcBounds.Dy()
+
+	if srcW == width && srcH == height {
+		return data, srcW, srcH, nil
 	}
 
 	dst := image.NewRGBA(image.Rect(0, 0, width, height))
@@ -235,9 +263,9 @@ func resizePNG(data []byte, width, height int) ([]byte, error) {
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, dst); err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
-	return buf.Bytes(), nil
+	return buf.Bytes(), srcW, srcH, nil
 }
 
 // ImageToBase64 encodes raw PNG bytes as a base64 string.
