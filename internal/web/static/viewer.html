@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Dexbox — Remote Desktop</title>
+  <style>
+    * { margin: 0; padding: 0; }
+    body { background: #1a1a1a; overflow: hidden; }
+    #display { width: 100vw; height: 100vh; }
+    #status {
+      position: fixed; top: 8px; right: 12px;
+      font: 13px/1 monospace; color: #888;
+      background: rgba(0,0,0,0.6); padding: 4px 8px;
+      border-radius: 4px; z-index: 10;
+    }
+    #status.connected { color: #4f4; }
+    #status.error { color: #f44; }
+  </style>
+</head>
+<body>
+  <div id="status">connecting...</div>
+  <div id="display"></div>
+
+  <!-- Apache Guacamole client JS (Apache-2.0) -->
+  <script src="/static/guacamole-common.min.js"></script>
+  <script>
+    (function() {
+      // Extract desktop name from URL path: /desktops/<name>/view
+      const pathParts = location.pathname.split('/');
+      const nameIdx = pathParts.indexOf('desktops') + 1;
+      const desktopName = pathParts[nameIdx] || '';
+
+      if (!desktopName) {
+        document.getElementById('status').textContent = 'error: no desktop name';
+        document.getElementById('status').className = 'error';
+        return;
+      }
+
+      document.title = 'Dexbox — ' + desktopName;
+
+      // Build WebSocket URL for the tunnel endpoint
+      const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const tunnelUrl = wsProto + '//' + location.host + '/desktops/' + desktopName + '/tunnel';
+
+      const tunnel = new Guacamole.WebSocketTunnel(tunnelUrl);
+      const client = new Guacamole.Client(tunnel);
+
+      const display = document.getElementById('display');
+      const statusEl = document.getElementById('status');
+
+      // Add the Guacamole display element
+      display.appendChild(client.getDisplay().getElement());
+
+      // Connect (pass empty string to avoid ?undefined in tunnel URL)
+      client.connect('');
+
+      // State change handler
+      client.onstatechange = function(state) {
+        switch (state) {
+          case 0: statusEl.textContent = 'idle'; break;
+          case 1: statusEl.textContent = 'connecting...'; break;
+          case 2: statusEl.textContent = 'waiting...'; break;
+          case 3:
+            statusEl.textContent = 'connected';
+            statusEl.className = 'connected';
+            // Auto-hide after 2s
+            setTimeout(function() { statusEl.style.opacity = '0.3'; }, 2000);
+            break;
+          case 4:
+            statusEl.textContent = 'disconnecting...';
+            statusEl.className = '';
+            break;
+          case 5:
+            statusEl.textContent = 'disconnected';
+            statusEl.className = 'error';
+            break;
+        }
+      };
+
+      client.onerror = function(error) {
+        statusEl.textContent = 'error: ' + (error.message || 'unknown');
+        statusEl.className = 'error';
+      };
+
+      // Mouse — attach to the Guacamole display element so coordinates
+      // are in remote display space (1024x768) directly.
+      var guacDisplay = client.getDisplay().getElement();
+      var mouse = new Guacamole.Mouse(guacDisplay);
+      mouse.onEach(['mousedown', 'mousemove', 'mouseup'], function(e) {
+        client.sendMouseState(e.state);
+      });
+
+      // Touch (for mobile/tablet)
+      var touch = new Guacamole.Mouse.Touchscreen(guacDisplay);
+      touch.onEach(['mousedown', 'mousemove', 'mouseup'], function(e) {
+        client.sendMouseState(e.state);
+      });
+
+      // Keyboard
+      const keyboard = new Guacamole.Keyboard(document);
+      keyboard.onkeydown = function(keysym) {
+        client.sendKeyEvent(1, keysym);
+      };
+      keyboard.onkeyup = function(keysym) {
+        client.sendKeyEvent(0, keysym);
+      };
+
+      // Handle resize
+      function resize() {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        client.sendSize(w, h);
+      }
+      window.addEventListener('resize', resize);
+
+      // Cleanup on page unload
+      window.addEventListener('beforeunload', function() {
+        client.disconnect();
+      });
+    })();
+  </script>
+</body>
+</html>

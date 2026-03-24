@@ -53,7 +53,9 @@ func (a *OpenAIAdapter) parseComputer(call map[string]any) (*CanonicalAction, er
 		return nil, fmt.Errorf("field 'action' required for computer tool")
 	}
 
-	params := map[string]any{}
+	params := map[string]any{
+		"action": action,
+	}
 	if coord, ok := call["coordinate"].([]any); ok {
 		params["coordinate"] = coord
 	}
@@ -65,6 +67,12 @@ func (a *OpenAIAdapter) parseComputer(call map[string]any) (*CanonicalAction, er
 	}
 	if url, ok := call["url"].(string); ok {
 		params["url"] = url
+	}
+	if dir, ok := call["direction"].(string); ok {
+		params["direction"] = dir
+	}
+	if amount, ok := call["amount"].(float64); ok {
+		params["amount"] = amount
 	}
 
 	return &CanonicalAction{

@@ -72,7 +72,9 @@ func (a *AnthropicAdapter) parseComputer(call map[string]any) (*CanonicalAction,
 		return nil, fmt.Errorf("field 'action' required for computer tool")
 	}
 
-	params := map[string]any{}
+	params := map[string]any{
+		"action": action, // Must be in Params for ComputerTool.Execute to read it
+	}
 	if coord, ok := call["coordinate"].([]any); ok {
 		params["coordinate"] = coord
 	}
@@ -81,6 +83,12 @@ func (a *AnthropicAdapter) parseComputer(call map[string]any) (*CanonicalAction,
 	}
 	if startCoord, ok := call["start_coordinate"].([]any); ok {
 		params["start_coordinate"] = startCoord
+	}
+	if dir, ok := call["direction"].(string); ok {
+		params["direction"] = dir
+	}
+	if amount, ok := call["amount"].(float64); ok {
+		params["amount"] = amount
 	}
 
 	return &CanonicalAction{

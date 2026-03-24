@@ -10,24 +10,28 @@ import (
 	"sync"
 	"time"
 
+	"github.com/getnenai/dexbox/internal/desktop"
 	"github.com/getnenai/dexbox/internal/tools"
 	"github.com/getnenai/dexbox/internal/vbox"
+	"github.com/getnenai/dexbox/internal/web"
 )
 
 // Server is the dexbox tool server.
 type Server struct {
-	manager *vbox.Manager
-	listen  string
-	vmUser  string
-	vmPass  string
-	display tools.DisplayConfig
-	shared  string
+	desktops *desktop.Manager
+	manager  *vbox.Manager // kept for VM-specific routes
+	listen   string
+	vmUser   string
+	vmPass   string
+	display  tools.DisplayConfig
+	shared   string
 
-	// Per-VM tool instances (lazily created)
-	mu        sync.RWMutex
-	computers map[string]*tools.ComputerTool
-	bashes    map[string]*tools.BashTool
-	editors   map[string]*tools.EditorTool
+	// Per-desktop tool instances (lazily created)
+	toolsMu      sync.RWMutex
+	computers    map[string]*tools.ComputerTool
+	computerDskt map[string]desktop.Desktop // desktop used to create each cached ComputerTool
+	bashes       map[string]*tools.BashTool
+	editors      map[string]*tools.EditorTool
 }
 
 // Options configures the tool server.
@@ -39,26 +43,45 @@ type Options struct {
 	Width      int
 	Height     int
 	SharedDir  string
+	Desktops   *desktop.Manager // optional; created from other opts if nil
 }
 
 // New creates a new tool server.
 func New(opts Options) *Server {
+	mgr := vbox.NewManager(opts.SOAPAddr, opts.VMUser, opts.VMPass)
+
+	var desktops *desktop.Manager
+	if opts.Desktops != nil {
+		desktops = opts.Desktops
+	} else {
+		store := desktop.NewConnectionStore(desktop.DefaultStorePath())
+		_ = store.Load()
+		desktops = desktop.NewManager(mgr, store, "localhost:4822")
+	}
+
 	return &Server{
-		manager:   vbox.NewManager(opts.SOAPAddr, opts.VMUser, opts.VMPass),
+		desktops:  desktops,
+		manager:   mgr,
 		listen:    opts.ListenAddr,
 		vmUser:    opts.VMUser,
 		vmPass:    opts.VMPass,
 		display:   tools.DisplayConfig{Width: opts.Width, Height: opts.Height},
 		shared:    opts.SharedDir,
-		computers: make(map[string]*tools.ComputerTool),
-		bashes:    make(map[string]*tools.BashTool),
-		editors:   make(map[string]*tools.EditorTool),
+		computers:    make(map[string]*tools.ComputerTool),
+		computerDskt: make(map[string]desktop.Desktop),
+		bashes:       make(map[string]*tools.BashTool),
+		editors:      make(map[string]*tools.EditorTool),
 	}
 }
 
 // Manager returns the underlying VM manager.
 func (s *Server) Manager() *vbox.Manager {
 	return s.manager
+}
+
+// DesktopManager returns the unified desktop manager.
+func (s *Server) DesktopManager() *desktop.Manager {
+	return s.desktops
 }
 
 // Run starts the HTTP server.
@@ -71,9 +94,35 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/actions", s.handleAction)
 	mux.HandleFunc("/actions/batch", s.handleBatchAction)
 
-	// VM lifecycle routes
+	// VM lifecycle routes (kept for backward compat)
 	mux.HandleFunc("/vm", s.handleVM)
 	mux.HandleFunc("/vm/", s.handleVMNamed)
+
+	// Unified desktop routes
+	mux.HandleFunc("/desktops", s.handleDesktops)
+
+	// Browser UI (view/tunnel) and desktop API share the /desktops/ prefix
+	store := desktop.NewConnectionStore(desktop.DefaultStorePath())
+	_ = store.Load()
+	webHandler := web.Handler(store, s.manager, "localhost:4822")
+
+	mux.HandleFunc("/desktops/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/desktops/")
+		parts := strings.SplitN(path, "/", 2)
+		action := ""
+		if len(parts) > 1 {
+			action = parts[1]
+		}
+		// Route view/tunnel to web handler, everything else to desktop API
+		if action == "view" || action == "tunnel" {
+			webHandler.ServeHTTP(w, r)
+		} else {
+			s.handleDesktopNamed(w, r)
+		}
+	})
+
+	// Static assets
+	mux.Handle("/static/", web.StaticHandler())
 
 	// Health
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -418,38 +467,31 @@ func (s *Server) handleVMNamed(w http.ResponseWriter, r *http.Request) {
 // --- Internal helpers ---
 
 func (s *Server) resolveVM(r *http.Request) (string, error) {
-	vmName := r.URL.Query().Get("vm")
-	if vmName != "" {
-		state, err := vbox.VMState(r.Context(), vmName)
-		if err != nil {
-			return "", fmt.Errorf("VM %q not found", vmName)
+	// Support both ?desktop= (new) and ?vm= (backward compat)
+	name := r.URL.Query().Get("desktop")
+	if name == "" {
+		name = r.URL.Query().Get("vm")
+	}
+
+	d, err := s.desktops.Resolve(name)
+	if err == nil {
+		return d.Name(), nil
+	}
+
+	// If a specific name was requested but not found in desktop manager,
+	// try VBox directly (for VMs not yet connected via desktop manager).
+	if name != "" {
+		state, verr := vbox.VMState(r.Context(), name)
+		if verr != nil {
+			return "", fmt.Errorf("desktop %q not found", name)
 		}
 		if state != "running" {
-			return "", fmt.Errorf("VM %q is not running (state: %s). Start it with POST /vm/%s/start", vmName, state, vmName)
+			return "", fmt.Errorf("desktop %q is not running (state: %s). Start it with POST /desktops/%s/up", name, state, name)
 		}
-		return vmName, nil
+		return name, nil
 	}
 
-	// Auto-resolve: find running VMs
-	vms, err := s.manager.List(r.Context())
-	if err != nil {
-		return "", fmt.Errorf("failed to list VMs: %w", err)
-	}
-
-	var running []string
-	for _, vm := range vms {
-		if vm.State == "running" {
-			running = append(running, vm.Name)
-		}
-	}
-
-	if len(running) == 0 {
-		return "", fmt.Errorf("no running VMs. Create one with POST /vm")
-	}
-	if len(running) > 1 {
-		return "", fmt.Errorf("multiple running VMs found (%s), specify ?vm=<name>", strings.Join(running, ", "))
-	}
-	return running[0], nil
+	return "", err
 }
 
 func (s *Server) executeAction(r *http.Request, vmName string, action *tools.CanonicalAction) (*tools.CanonicalResult, error) {
@@ -492,70 +534,206 @@ func (s *Server) executeAction(r *http.Request, vmName string, action *tools.Can
 	}
 }
 
-func (s *Server) getComputerTool(r *http.Request, vmName string) (*tools.ComputerTool, error) {
-	s.mu.RLock()
-	if ct, ok := s.computers[vmName]; ok {
-		s.mu.RUnlock()
+func (s *Server) getComputerTool(r *http.Request, name string) (*tools.ComputerTool, error) {
+	// Try to get from Desktop Manager first (supports both VM and RDP)
+	d, ok := s.desktops.Get(name)
+	if !ok {
+		if s.manager == nil {
+			return nil, fmt.Errorf("desktop %q is not connected; run 'dexbox up %s' first", name, name)
+		}
+		// Fall back to creating a VBox desktop (backward compat for VMs
+		// that were started outside the desktop manager).
+		vd := desktop.NewVBox(name, s.manager)
+		if !vd.Connected() {
+			if err := vd.Connect(r.Context()); err != nil {
+				return nil, fmt.Errorf("desktop %q is not connected and SOAP fallback failed: %w", name, err)
+			}
+		}
+		d = vd
+	}
+
+	// Reuse cached tool only if it was built for the same desktop instance.
+	s.toolsMu.RLock()
+	ct, cached := s.computers[name]
+	cachedDskt := s.computerDskt[name]
+	s.toolsMu.RUnlock()
+
+	if cached && cachedDskt == d {
 		return ct, nil
 	}
-	s.mu.RUnlock()
 
-	if s.manager.SOAPClient(vmName) == nil {
-		if err := s.manager.ConnectSOAP(r.Context(), vmName); err != nil {
-			return nil, fmt.Errorf("SOAP connect failed: %w", err)
-		}
-	}
-
-	// Sync VM display resolution to match the tool's coordinate space.
-	// This ensures Claude's click coordinates map 1:1 to VM pixels.
-	if err := vbox.SetVideoMode(r.Context(), vmName, s.display.Width, s.display.Height, 32); err != nil {
-		log.Printf("Warning: failed to set VM display resolution to %dx%d: %v", s.display.Width, s.display.Height, err)
-	}
-
-	ct := tools.NewComputerTool(vmName, s.display.Width, s.display.Height, s.manager.SOAPClient(vmName))
-	s.mu.Lock()
-	s.computers[vmName] = ct
-	s.mu.Unlock()
+	ct = tools.NewComputerTool(d, s.display.Width, s.display.Height)
+	s.toolsMu.Lock()
+	s.computers[name] = ct
+	s.computerDskt[name] = d
+	s.toolsMu.Unlock()
 	return ct, nil
 }
 
 // reconnectComputerTool forces a fresh SOAP session and invalidates the cached tool.
 // The caller should use getComputerTool to rebuild it (which also runs SetVideoMode).
 func (s *Server) reconnectComputerTool(r *http.Request, vmName string) error {
-	s.mu.Lock()
+	s.toolsMu.Lock()
 	delete(s.computers, vmName)
-	s.mu.Unlock()
+	delete(s.computerDskt, vmName)
+	s.toolsMu.Unlock()
 	return s.manager.ReconnectSOAP(r.Context(), vmName)
 }
 
 func (s *Server) getBashTool(vmName string) *tools.BashTool {
-	s.mu.RLock()
-	if bt, ok := s.bashes[vmName]; ok {
-		s.mu.RUnlock()
+	s.toolsMu.RLock()
+	bt, ok := s.bashes[vmName]
+	s.toolsMu.RUnlock()
+	if ok {
 		return bt
 	}
-	s.mu.RUnlock()
-
-	bt := tools.NewBashTool(vmName, s.vmUser, s.vmPass)
-	s.mu.Lock()
+	bt = tools.NewBashTool(vmName, s.vmUser, s.vmPass)
+	s.toolsMu.Lock()
+	if existing, ok := s.bashes[vmName]; ok {
+		s.toolsMu.Unlock()
+		return existing
+	}
 	s.bashes[vmName] = bt
-	s.mu.Unlock()
+	s.toolsMu.Unlock()
 	return bt
 }
 
 func (s *Server) getEditorTool(vmName string) *tools.EditorTool {
-	s.mu.RLock()
-	if et, ok := s.editors[vmName]; ok {
-		s.mu.RUnlock()
+	s.toolsMu.RLock()
+	et, ok := s.editors[vmName]
+	s.toolsMu.RUnlock()
+	if ok {
 		return et
 	}
-	s.mu.RUnlock()
-
-	et := tools.NewEditorTool(vmName, s.vmUser, s.vmPass, s.shared)
-	s.mu.Lock()
+	et = tools.NewEditorTool(vmName, s.vmUser, s.vmPass, s.shared)
+	s.toolsMu.Lock()
+	if existing, ok := s.editors[vmName]; ok {
+		s.toolsMu.Unlock()
+		return existing
+	}
 	s.editors[vmName] = et
-	s.mu.Unlock()
+	s.toolsMu.Unlock()
 	return et
+}
+
+// --- Unified desktop routes ---
+
+func (s *Server) handleDesktops(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	typeFilter := r.URL.Query().Get("type")
+	desktops, err := s.desktops.List(r.Context(), typeFilter)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":   "tool_error",
+			"message": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"desktops": desktops})
+}
+
+func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	path := strings.TrimPrefix(r.URL.Path, "/desktops/")
+	parts := strings.SplitN(path, "/", 2)
+	name := parts[0]
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+
+	if name == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Special routes that don't require an existing desktop
+	if name == "down-all" && r.Method == http.MethodPost {
+		force := r.URL.Query().Get("force") == "true"
+		if err := s.desktops.DownAll(ctx, force); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "all_down"})
+		return
+	}
+
+	switch {
+	case r.Method == http.MethodPost && action == "up":
+		if err := s.desktops.Up(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "status": "up"})
+
+	case r.Method == http.MethodPost && action == "down":
+		shutdown := r.URL.Query().Get("shutdown") == "true"
+		force := r.URL.Query().Get("force") == "true"
+		if err := s.desktops.Down(ctx, name, shutdown, force); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "status": "down"})
+
+	case r.Method == http.MethodPost && action == "shutdown":
+		force := r.URL.Query().Get("force") == "true"
+		if err := s.desktops.Down(ctx, name, true, force); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "status": "shutdown"})
+
+	// Forward VM-only power commands
+	case r.Method == http.MethodPost && action == "pause":
+		if err := s.manager.Pause(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "paused"})
+
+	case r.Method == http.MethodPost && action == "suspend":
+		if err := s.manager.Suspend(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "saved"})
+
+	case r.Method == http.MethodPost && action == "resume":
+		if err := s.manager.Resume(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "running"})
+
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

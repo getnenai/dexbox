@@ -2,11 +2,12 @@
 //
 // Commands:
 //
-//	dexbox start        — Start dexbox server + vboxwebsrv daemon
-//	dexbox stop         — Stop dexbox server + vboxwebsrv
+//	dexbox start        — Start dexbox server + vboxwebsrv + guacd
+//	dexbox stop         — Stop dexbox server + vboxwebsrv + guacd
 //	dexbox status       — Server health + list of VMs
 //	dexbox create vm    — Install VirtualBox + create and provision a VM
 //	dexbox vm ...       — VM lifecycle commands
+//	dexbox rdp ...      — Manage RDP connections
 //	dexbox run ...      — Execute tool actions directly
 package main
 
@@ -28,6 +29,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/getnenai/dexbox/internal/config"
+	"github.com/getnenai/dexbox/internal/desktop"
+	"github.com/getnenai/dexbox/internal/guacd"
 	"github.com/getnenai/dexbox/internal/server"
 	"github.com/getnenai/dexbox/internal/vbox"
 )
@@ -65,7 +68,11 @@ Environment variables (or .env file):
 
 	root.PersistentFlags().StringVarP(&envFile, "env-file", "e", "", "Path to .env file")
 
-	root.AddCommand(cmdStart(), cmdStop(), cmdStatus(), cmdCreate(), cmdVM(), cmdRunAction())
+	root.AddCommand(
+		cmdStart(), cmdStop(), cmdStatus(),
+		cmdUp(), cmdDown(), cmdList(), cmdView(),
+		cmdCreate(), cmdVM(), cmdRDP(), cmdRunAction(),
+	)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -79,7 +86,7 @@ Environment variables (or .env file):
 func cmdStart() *cobra.Command {
 	return &cobra.Command{
 		Use:   "start",
-		Short: "Start dexbox server and vboxwebsrv",
+		Short: "Start dexbox server, vboxwebsrv, and guacd",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			port := parseSoapPort()
 
@@ -99,6 +106,20 @@ func cmdStart() *cobra.Command {
 				return fmt.Errorf("vboxwebsrv failed to start: %w", err)
 			}
 
+			// Start guacd (Docker) for RDP support
+			ctx := context.Background()
+			if guacd.DockerAvailable(ctx) {
+				fmt.Println("Starting guacd...")
+				if err := guacd.Start(ctx); err != nil {
+					fmt.Printf("Warning: failed to start guacd: %v\n", err)
+					fmt.Println("RDP connections will not be available. VMs still work.")
+				} else {
+					fmt.Println("guacd running on port 4822")
+				}
+			} else {
+				fmt.Println("Docker not available — skipping guacd (RDP connections disabled)")
+			}
+
 			fmt.Println("Starting dexbox server...")
 			srv := server.New(server.Options{
 				ListenAddr: config.Listen,
@@ -110,7 +131,8 @@ func cmdStart() *cobra.Command {
 				SharedDir:  config.SharedDir,
 			})
 
-			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			// Handle shutdown signals
+			sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 
 			errCh := make(chan error, 1)
@@ -137,15 +159,18 @@ func cmdStart() *cobra.Command {
 			select {
 			case err := <-errCh:
 				stopVBox()
+				_ = guacd.Stop(context.Background())
 				return err
 			case err := <-vboxDied:
+				_ = guacd.Stop(context.Background())
 				if err != nil {
 					return fmt.Errorf("vboxwebsrv exited unexpectedly: %w", err)
 				}
 				return fmt.Errorf("vboxwebsrv exited unexpectedly")
-			case <-ctx.Done():
+			case <-sigCtx.Done():
 				fmt.Println("\nShutting down...")
 				stopVBox()
+				_ = guacd.Stop(context.Background())
 				return nil
 			}
 		},
@@ -159,8 +184,10 @@ func cmdStart() *cobra.Command {
 func cmdStop() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
-		Short: "Stop dexbox server and vboxwebsrv",
+		Short: "Stop dexbox server, vboxwebsrv, and guacd",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+
 			fmt.Println("Stopping vboxwebsrv...")
 			_ = exec.Command("pkill", "-f", "vboxwebsrv").Run()
 
@@ -168,15 +195,18 @@ func cmdStop() *cobra.Command {
 			deadline := time.Now().Add(5 * time.Second)
 			for time.Now().Before(deadline) {
 				if exec.Command("pgrep", "-f", "vboxwebsrv").Run() != nil {
-					fmt.Println("Stopped.")
-					return nil
+					break
 				}
 				time.Sleep(500 * time.Millisecond)
 			}
 
 			// Force kill if still alive.
 			_ = exec.Command("pkill", "-9", "-f", "vboxwebsrv").Run()
-			fmt.Println("Force stopped.")
+
+			fmt.Println("Stopping guacd...")
+			_ = guacd.Stop(ctx)
+
+			fmt.Println("Stopped.")
 			return nil
 		},
 	}
@@ -212,35 +242,246 @@ func waitForPort(port string, timeout time.Duration) error {
 func cmdStatus() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show server health and VM states",
+		Short: "Show server health, VM states, and RDP connections",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
+
+			// guacd status
+			guacdRunning, _ := guacd.IsRunning(ctx)
+			if guacdRunning {
+				fmt.Println("guacd: running (port 4822)")
+			} else if guacd.DockerAvailable(ctx) {
+				fmt.Println("guacd: not running")
+			} else {
+				fmt.Println("guacd: Docker not available")
+			}
+			fmt.Println()
 
 			// List VMs
 			vms, err := vbox.ListVMs(ctx)
 			if err != nil {
 				fmt.Printf("VirtualBox: not available (%v)\n", err)
-				return nil
-			}
-
-			if len(vms) == 0 {
-				fmt.Println("No VMs found. Run 'dexbox create vm <name> --iso <path>' to create one.")
-				return nil
-			}
-
-			fmt.Printf("%-20s %-12s %s\n", "NAME", "STATE", "GUEST ADDITIONS")
-			for _, name := range vms {
-				state, _ := vbox.VMState(ctx, name)
-				ga := vbox.GuestAdditionsReady(ctx, name)
-				gaStr := "no"
-				if ga {
-					gaStr = "yes"
+			} else if len(vms) == 0 {
+				fmt.Println("VMs: none")
+			} else {
+				fmt.Printf("%-20s %-12s %s\n", "VM", "STATE", "GUEST ADDITIONS")
+				for _, name := range vms {
+					state, _ := vbox.VMState(ctx, name)
+					ga := vbox.GuestAdditionsReady(ctx, name)
+					gaStr := "no"
+					if ga {
+						gaStr = "yes"
+					}
+					fmt.Printf("%-20s %-12s %s\n", name, state, gaStr)
 				}
-				fmt.Printf("%-20s %-12s %s\n", name, state, gaStr)
+			}
+			fmt.Println()
+
+			// RDP connections
+			store := desktop.NewConnectionStore(desktop.DefaultStorePath())
+			if err := store.Load(); err != nil {
+				return fmt.Errorf("load connection store: %w", err)
+			}
+			conns := store.List()
+			if len(conns) == 0 {
+				fmt.Println("RDP: none")
+			} else {
+				fmt.Printf("%-20s %-30s %s\n", "RDP CONNECTION", "HOST", "USER")
+				for name, cfg := range conns {
+					fmt.Printf("%-20s %-30s %s\n", name, fmt.Sprintf("%s:%d", cfg.Host, cfg.Port), cfg.Username)
+				}
+			}
+
+			return nil
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dexbox up / down / list
+// ---------------------------------------------------------------------------
+
+func newDesktopManager() (*desktop.Manager, error) {
+	store := desktop.NewConnectionStore(desktop.DefaultStorePath())
+	if err := store.Load(); err != nil {
+		return nil, fmt.Errorf("load connection store: %w", err)
+	}
+	return desktop.NewManager(
+		vbox.NewManager(config.SOAPAddr, config.VMUser, config.VMPass),
+		store,
+		guacd.DefaultAddr,
+	), nil
+}
+
+func cmdUp() *cobra.Command {
+	return &cobra.Command{
+		Use:   "up <name>",
+		Short: "Connect to a desktop (boot VM or verify RDP target)",
+		Long: `Bring a desktop online.
+
+For VMs: boots the VM if not running (durable — VM keeps running after exit).
+For RDP: verifies guacd is running and the RDP target is reachable. RDP
+sessions are per-command; each 'dexbox run' reconnects automatically.
+
+Examples:
+  dexbox up my-vm
+  dexbox up my-rdp-server`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mgr, err := newDesktopManager()
+			if err != nil {
+				return err
+			}
+			if err := mgr.Up(context.Background(), args[0]); err != nil {
+				return err
+			}
+			fmt.Printf("Desktop %q is up\n", args[0])
+			return nil
+		},
+	}
+}
+
+func cmdDown() *cobra.Command {
+	var (
+		shutdown bool
+		force    bool
+		all      bool
+	)
+
+	c := &cobra.Command{
+		Use:   "down [name]",
+		Short: "Disconnect a desktop or shut down everything",
+		Long: `Disconnect a desktop session or shut down all desktops.
+
+Without --all, disconnects the named desktop (VM stays running).
+With --shutdown, also powers off the VM (RDP targets cannot be shut down).
+With --all, disconnects all sessions, shuts down all VMs, and stops guacd.
+
+Examples:
+  dexbox down my-vm              # disconnect session, VM keeps running
+  dexbox down my-vm --shutdown   # disconnect + ACPI power off
+  dexbox down --all              # shut everything down
+  dexbox down --all --force      # hard poweroff all VMs`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if all && len(args) > 0 {
+				return fmt.Errorf("cannot specify both a name and --all")
+			}
+			if !all && len(args) == 0 {
+				return fmt.Errorf("specify a desktop name or use --all")
+			}
+
+			mgr, err := newDesktopManager()
+			if err != nil {
+				return err
+			}
+			ctx := context.Background()
+
+			if all {
+				if err := mgr.DownAll(ctx, force); err != nil {
+					return err
+				}
+				fmt.Println("All desktops shut down")
+				return nil
+			}
+
+			name := args[0]
+			if err := mgr.Down(ctx, name, shutdown, force); err != nil {
+				return err
+			}
+			if shutdown {
+				fmt.Printf("Desktop %q shut down\n", name)
+			} else {
+				fmt.Printf("Desktop %q disconnected\n", name)
 			}
 			return nil
 		},
 	}
+
+	c.Flags().BoolVar(&shutdown, "shutdown", false, "Also power off the VM (VM only)")
+	c.Flags().BoolVar(&force, "force", false, "Hard poweroff instead of ACPI (requires --shutdown or --all)")
+	c.Flags().BoolVar(&all, "all", false, "Disconnect all sessions and shut down all VMs")
+
+	return c
+}
+
+func cmdList() *cobra.Command {
+	var typeFilter string
+
+	c := &cobra.Command{
+		Use:   "list",
+		Short: "List all desktops (VMs and RDP connections)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mgr, err := newDesktopManager()
+			if err != nil {
+				return err
+			}
+			desktops, err := mgr.List(context.Background(), typeFilter)
+			if err != nil {
+				return err
+			}
+
+			if len(desktops) == 0 {
+				fmt.Println("No desktops found.")
+				return nil
+			}
+
+			fmt.Printf("%-20s %-6s %-14s %s\n", "NAME", "TYPE", "STATE", "CONNECTED")
+			for _, d := range desktops {
+				connStr := "no"
+				if d.Connected {
+					connStr = "yes"
+				}
+				fmt.Printf("%-20s %-6s %-14s %s\n", d.Name, d.Type, d.State, connStr)
+			}
+			return nil
+		},
+	}
+
+	c.Flags().StringVar(&typeFilter, "type", "", "Filter by type: vm or rdp")
+	return c
+}
+
+// ---------------------------------------------------------------------------
+// dexbox view
+// ---------------------------------------------------------------------------
+
+func cmdView() *cobra.Command {
+	return &cobra.Command{
+		Use:   "view <name>",
+		Short: "Open a desktop in the browser",
+		Long: `Open the browser-based remote desktop viewer for the named desktop.
+
+This requires the dexbox server to be running (dexbox start) and guacd
+to be available for RDP connections.
+
+Example:
+  dexbox view my-rdp-server`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			url := fmt.Sprintf("http://localhost%s/desktops/%s/view", config.Listen, name)
+			fmt.Printf("Opening %s\n", url)
+
+			// Open browser
+			var openCmd *exec.Cmd
+			switch {
+			case fileExists("/usr/bin/open"): // macOS
+				openCmd = exec.Command("open", url)
+			case fileExists("/usr/bin/xdg-open"): // Linux
+				openCmd = exec.Command("xdg-open", url)
+			default:
+				fmt.Printf("Open this URL in your browser: %s\n", url)
+				return nil
+			}
+			return openCmd.Start()
+		},
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // ---------------------------------------------------------------------------
@@ -397,32 +638,216 @@ func resolveVMName(ctx context.Context, args []string) (string, error) {
 }
 
 // ---------------------------------------------------------------------------
+// dexbox rdp
+// ---------------------------------------------------------------------------
+
+func cmdRDP() *cobra.Command {
+	rdp := &cobra.Command{
+		Use:   "rdp",
+		Short: "Manage RDP connections",
+		Long: `Manage RDP desktop connections.
+
+RDP connections are stored in ~/.dexbox/connections.json and use
+Apache Guacamole (guacd) as the connection proxy.`,
+	}
+
+	rdp.AddCommand(cmdRDPAdd(), cmdRDPRemove(), cmdRDPList(), cmdRDPConnect(), cmdRDPDisconnect())
+	return rdp
+}
+
+func cmdRDPAdd() *cobra.Command {
+	var (
+		host       string
+		port       int
+		user       string
+		pass       string
+		width      int
+		height     int
+		ignoreCert bool
+		security   string
+	)
+
+	c := &cobra.Command{
+		Use:   "add <name>",
+		Short: "Register an RDP connection",
+		Long: `Register a new RDP connection target.
+
+Example:
+  dexbox rdp add my-server --host 192.168.1.100 --user Administrator --pass secret`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+
+			// Check for name collision with VMs
+			ctx := context.Background()
+			if vbox.VMExists(ctx, name) {
+				return fmt.Errorf("name %q is already used by a VM; choose a different name", name)
+			}
+
+			store := desktop.NewConnectionStore(desktop.DefaultStorePath())
+			if err := store.Load(); err != nil {
+				return err
+			}
+
+			cfg := desktop.RDPConfig{
+				Host:       host,
+				Port:       port,
+				Username:   user,
+				Password:   pass,
+				Width:      width,
+				Height:     height,
+				IgnoreCert: ignoreCert,
+				Security:   security,
+			}
+
+			if err := store.Add(name, cfg); err != nil {
+				return err
+			}
+			if err := store.Save(); err != nil {
+				return err
+			}
+
+			fmt.Printf("Added RDP connection %q → %s:%d\n", name, host, cfg.Port)
+			return nil
+		},
+	}
+
+	c.Flags().StringVar(&host, "host", "", "RDP host address (required)")
+	c.Flags().IntVar(&port, "port", 3389, "RDP port")
+	c.Flags().StringVar(&user, "user", "", "Username (required)")
+	c.Flags().StringVar(&pass, "pass", "", "Password (required)")
+	c.Flags().IntVar(&width, "width", 1024, "Display width in pixels")
+	c.Flags().IntVar(&height, "height", 768, "Display height in pixels")
+	c.Flags().BoolVar(&ignoreCert, "ignore-cert", true, "Ignore certificate validation")
+	c.Flags().StringVar(&security, "security", "", "RDP security mode: any (default), rdp, nla, tls (use rdp for VirtualBox VRDE)")
+	_ = c.MarkFlagRequired("host")
+	_ = c.MarkFlagRequired("user")
+	_ = c.MarkFlagRequired("pass")
+
+	return c
+}
+
+func cmdRDPRemove() *cobra.Command {
+	return &cobra.Command{
+		Use:   "remove <name>",
+		Short: "Unregister an RDP connection",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+
+			store := desktop.NewConnectionStore(desktop.DefaultStorePath())
+			if err := store.Load(); err != nil {
+				return err
+			}
+			if err := store.Remove(name); err != nil {
+				return err
+			}
+			if err := store.Save(); err != nil {
+				return err
+			}
+
+			fmt.Printf("Removed RDP connection %q\n", name)
+			return nil
+		},
+	}
+}
+
+func cmdRDPList() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List RDP connections",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store := desktop.NewConnectionStore(desktop.DefaultStorePath())
+			if err := store.Load(); err != nil {
+				return err
+			}
+
+			conns := store.List()
+			if len(conns) == 0 {
+				fmt.Println("No RDP connections. Run 'dexbox rdp add <name> --host <host> --user <user> --pass <pass>' to add one.")
+				return nil
+			}
+
+			fmt.Printf("%-20s %-30s %-15s %s\n", "NAME", "HOST", "USER", "RESOLUTION")
+			for name, cfg := range conns {
+				fmt.Printf("%-20s %-30s %-15s %dx%d\n",
+					name,
+					fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+					cfg.Username,
+					cfg.Width, cfg.Height,
+				)
+			}
+			return nil
+		},
+	}
+}
+
+func cmdRDPConnect() *cobra.Command {
+	return &cobra.Command{
+		Use:   "connect <name>",
+		Short: "Verify an RDP target is reachable (alias for 'dexbox up')",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mgr, err := newDesktopManager()
+			if err != nil {
+				return err
+			}
+			if err := mgr.Up(context.Background(), args[0]); err != nil {
+				return err
+			}
+			fmt.Printf("Connected to %q\n", args[0])
+			return nil
+		},
+	}
+}
+
+func cmdRDPDisconnect() *cobra.Command {
+	return &cobra.Command{
+		Use:   "disconnect <name>",
+		Short: "Disconnect from an RDP desktop (alias for 'dexbox down')",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mgr, err := newDesktopManager()
+			if err != nil {
+				return err
+			}
+			if err := mgr.Down(context.Background(), args[0], false, false); err != nil {
+				return err
+			}
+			fmt.Printf("Disconnected from %q\n", args[0])
+			return nil
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
 // dexbox run
 // ---------------------------------------------------------------------------
 
 func cmdRunAction() *cobra.Command {
 	var (
-		toolType   string
-		action     string
-		coordinate string
-		text       string
-		command    string
-		path       string
-		fileText   string
-		oldStr     string
-		newStr     string
-		vmName     string
+		toolType    string
+		action      string
+		coordinate  string
+		text        string
+		command     string
+		path        string
+		fileText    string
+		oldStr      string
+		newStr      string
+		vmName      string
+		desktopName string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Execute a tool action directly",
-		Long: `Execute a low-level tool action against a VM.
+		Long: `Execute a low-level tool action against a desktop (VM or RDP connection).
 
 Tool types and their actions:
 
   computer
-    screenshot               Capture the VM screen (outputs raw PNG to stdout)
+    screenshot               Capture the screen (outputs raw PNG to stdout)
     left_click   --coordinate x,y
     right_click  --coordinate x,y
     middle_click --coordinate x,y
@@ -432,10 +857,10 @@ Tool types and their actions:
     type         --text <string>    Type a string of text
     key          --text <key>       Press a key (e.g. Return, ctrl+c)
 
-  bash
+  bash (VM only)
     --command <ps1>   Run a PowerShell command on the guest and print output
 
-  text_editor
+  text_editor (VM only)
     --command view    --path <guest-path>
     --command create  --path <guest-path> --file-text <content>
 
@@ -444,32 +869,50 @@ Examples:
   dexbox run --type computer --action left_click --coordinate 100,200
   dexbox run --type computer --action type --text "hello world"
   dexbox run --type bash --command "Get-Process"
-  dexbox run --type text_editor --command view --path 'C:\Users\dexbox\file.txt'`,
+  dexbox run --desktop my-rdp --type computer --action screenshot > screen.png`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
-			mgr := vbox.NewManager(config.SOAPAddr, config.VMUser, config.VMPass)
 
-			name := vmName
+			// Determine desktop name from --desktop or --vm (backward compat)
+			name := desktopName
 			if name == "" {
+				name = vmName
+			}
+
+			mgr, err := newDesktopManager()
+			if err != nil {
+				return err
+			}
+
+			// If we have a name, try to bring it up
+			if name != "" {
+				if err := mgr.Up(ctx, name); err != nil {
+					return err
+				}
+			} else {
+				// Auto-resolve: try to find a single VM
 				var err error
 				name, err = resolveVMName(ctx, nil)
 				if err != nil {
 					return err
 				}
+				if err := mgr.Up(ctx, name); err != nil {
+					return err
+				}
 			}
 
-			// Ensure SOAP is connected
-			if err := mgr.Start(ctx, name); err != nil {
+			d, err := mgr.Resolve(name)
+			if err != nil {
 				return err
 			}
 
-			soap := mgr.SOAPClient(name)
-
 			switch toolType {
 			case "computer":
-				ct := newComputerToolForRun(name, soap)
-				return runComputerAction(ctx, ct, action, coordinate, text)
+				return runComputerAction(ctx, d, action, coordinate, text)
 			case "bash":
+				if d.Type() == "rdp" {
+					return fmt.Errorf("bash tool is not supported for RDP connections (only VMs with Guest Additions)")
+				}
 				out, err := vbox.GuestRun(ctx, name, config.VMUser, config.VMPass,
 					"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
 					"-NoProfile", "-NonInteractive", "-Command", command)
@@ -479,6 +922,9 @@ Examples:
 				fmt.Print(out)
 				return nil
 			case "text_editor":
+				if d.Type() == "rdp" {
+					return fmt.Errorf("text_editor tool is not supported for RDP connections (only VMs with Guest Additions)")
+				}
 				return runEditorAction(ctx, name, command, path, fileText, oldStr, newStr)
 			default:
 				return fmt.Errorf("unknown tool type %q (use: computer, bash, text_editor)", toolType)
@@ -495,25 +941,17 @@ Examples:
 	cmd.Flags().StringVar(&fileText, "file-text", "", "File content to write (required for text_editor create)")
 	cmd.Flags().StringVar(&oldStr, "old-str", "", "String to replace (text_editor str_replace)")
 	cmd.Flags().StringVar(&newStr, "new-str", "", "Replacement string (text_editor str_replace)")
-	cmd.Flags().StringVar(&vmName, "vm", "", "VM name (auto-detected when only one VM exists)")
+	cmd.Flags().StringVar(&desktopName, "desktop", "", "Desktop name (VM or RDP connection)")
+	cmd.Flags().StringVar(&vmName, "vm", "", "VM name (deprecated, use --desktop)")
 	_ = cmd.MarkFlagRequired("type")
 
 	return cmd
 }
 
-func newComputerToolForRun(vmName string, soap *vbox.SOAPClient) *computerToolRunner {
-	return &computerToolRunner{vmName: vmName, soap: soap}
-}
-
-type computerToolRunner struct {
-	vmName string
-	soap   *vbox.SOAPClient
-}
-
-func runComputerAction(ctx context.Context, ct *computerToolRunner, action, coordinate, text string) error {
+func runComputerAction(ctx context.Context, d desktop.Desktop, action, coordinate, text string) error {
 	switch action {
 	case "screenshot":
-		data, err := vbox.Screenshot(ctx, ct.vmName)
+		data, err := d.Screenshot(ctx)
 		if err != nil {
 			return err
 		}
@@ -532,27 +970,25 @@ func runComputerAction(ctx context.Context, ct *computerToolRunner, action, coor
 			buttonMask = 4
 		}
 		if action == "double_click" {
-			return ct.soap.MouseDoubleClick(x, y, 1)
+			return d.MouseDoubleClick(x, y, 1)
 		}
-		return ct.soap.MouseClick(x, y, buttonMask)
+		return d.MouseClick(x, y, buttonMask)
 	case "type":
-		codes := vbox.TextToScancodes(text)
-		return vbox.SendScancodes(ctx, ct.vmName, codes)
+		return d.TypeText(ctx, text)
 	case "key":
-		codes := vbox.KeyToScancodes(text)
-		return vbox.SendScancodes(ctx, ct.vmName, codes)
+		return d.KeyPress(ctx, text)
 	case "mouse_move":
 		x, y, err := parseCoordinate(coordinate)
 		if err != nil {
 			return err
 		}
-		return ct.soap.MouseMoveAbsolute(x, y)
+		return d.MouseMoveAbsolute(x, y)
 	case "scroll":
 		x, y, err := parseCoordinate(coordinate)
 		if err != nil {
 			return err
 		}
-		return ct.soap.MouseScroll(x, y, -3)
+		return d.MouseScroll(x, y, -3)
 	default:
 		return fmt.Errorf("unknown computer action %q", action)
 	}

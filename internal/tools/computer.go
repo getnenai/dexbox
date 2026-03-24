@@ -9,30 +9,28 @@ import (
 	"image/png"
 	"time"
 
-	"github.com/getnenai/dexbox/internal/vbox"
+	"github.com/getnenai/dexbox/internal/desktop"
 	"golang.org/x/image/draw"
 )
 
 // ComputerTool executes computer-use actions (screenshot, keyboard, mouse)
-// against a VirtualBox VM.
+// against any Desktop backend (VBox, RDP, etc.).
 type ComputerTool struct {
-	vmName   string
-	width    int // screenshot target dimensions (what the model sees)
+	desktop  desktop.Desktop
+	width    int
 	height   int
-	soap     *vbox.SOAPClient
 	cursorX  int
 	cursorY  int
 	displayW int // actual VM display dimensions (what SOAP uses), set on first screenshot
 	displayH int
 }
 
-// NewComputerTool creates a computer tool bound to a specific VM.
-func NewComputerTool(vmName string, width, height int, soap *vbox.SOAPClient) *ComputerTool {
+// NewComputerTool creates a computer tool bound to a Desktop.
+func NewComputerTool(d desktop.Desktop, width, height int) *ComputerTool {
 	return &ComputerTool{
-		vmName: vmName,
-		width:  width,
-		height: height,
-		soap:   soap,
+		desktop: d,
+		width:   width,
+		height:  height,
 	}
 }
 
@@ -73,7 +71,7 @@ func (t *ComputerTool) Execute(ctx context.Context, action *CanonicalAction) (*C
 }
 
 func (t *ComputerTool) screenshot(ctx context.Context) (*CanonicalResult, error) {
-	raw, err := vbox.Screenshot(ctx, t.vmName)
+	raw, err := t.desktop.Screenshot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +108,7 @@ func (t *ComputerTool) click(ctx context.Context, coord *[2]int, buttonMask int)
 	t.cursorX, t.cursorY = coord[0], coord[1]
 	sc := t.scaleCoord(coord)
 
-	if err := t.soap.MouseClick(sc[0], sc[1], buttonMask); err != nil {
+	if err := t.desktop.MouseClick(sc[0], sc[1], buttonMask); err != nil {
 		return nil, err
 	}
 	return &CanonicalResult{}, nil
@@ -123,7 +121,7 @@ func (t *ComputerTool) doubleClick(ctx context.Context, coord *[2]int) (*Canonic
 	t.cursorX, t.cursorY = coord[0], coord[1]
 	sc := t.scaleCoord(coord)
 
-	if err := t.soap.MouseDoubleClick(sc[0], sc[1], 1); err != nil {
+	if err := t.desktop.MouseDoubleClick(sc[0], sc[1], 1); err != nil {
 		return nil, err
 	}
 	return &CanonicalResult{}, nil
@@ -134,19 +132,8 @@ func (t *ComputerTool) typeText(ctx context.Context, text string) (*CanonicalRes
 		return nil, fmt.Errorf("field 'text' required for action 'type'")
 	}
 
-	codes := vbox.TextToScancodes(text)
-	const batchSize = 60
-	for i := 0; i < len(codes); i += batchSize {
-		end := i + batchSize
-		if end > len(codes) {
-			end = len(codes)
-		}
-		if err := vbox.SendScancodes(ctx, t.vmName, codes[i:end]); err != nil {
-			return nil, err
-		}
-		if end < len(codes) {
-			time.Sleep(10 * time.Millisecond)
-		}
+	if err := t.desktop.TypeText(ctx, text); err != nil {
+		return nil, err
 	}
 	return &CanonicalResult{}, nil
 }
@@ -156,8 +143,7 @@ func (t *ComputerTool) key(ctx context.Context, text string) (*CanonicalResult, 
 		return nil, fmt.Errorf("field 'text' required for action 'key'")
 	}
 
-	codes := vbox.KeyToScancodes(text)
-	if err := vbox.SendScancodes(ctx, t.vmName, codes); err != nil {
+	if err := t.desktop.KeyPress(ctx, text); err != nil {
 		return nil, err
 	}
 	return &CanonicalResult{}, nil
@@ -170,7 +156,7 @@ func (t *ComputerTool) mouseMove(ctx context.Context, coord *[2]int) (*Canonical
 	t.cursorX, t.cursorY = coord[0], coord[1]
 	sc := t.scaleCoord(coord)
 
-	if err := t.soap.MouseMoveAbsolute(sc[0], sc[1]); err != nil {
+	if err := t.desktop.MouseMoveAbsolute(sc[0], sc[1]); err != nil {
 		return nil, err
 	}
 	return &CanonicalResult{}, nil
@@ -197,7 +183,7 @@ func (t *ComputerTool) scroll(ctx context.Context, coord *[2]int, direction stri
 		return nil, fmt.Errorf("invalid scroll direction %q; expected 'up' or 'down'", direction)
 	}
 
-	if err := t.soap.MouseScroll(sc[0], sc[1], dz); err != nil {
+	if err := t.desktop.MouseScroll(sc[0], sc[1], dz); err != nil {
 		return nil, err
 	}
 	return &CanonicalResult{}, nil
@@ -219,24 +205,24 @@ func (t *ComputerTool) drag(ctx context.Context, start, end *[2]int) (*Canonical
 	sx, sy := ss[0], ss[1]
 	ex, ey := se[0], se[1]
 
-	if err := t.soap.MouseDown(sx, sy, 1); err != nil {
+	if err := t.desktop.MouseDown(sx, sy, 1); err != nil {
 		return nil, err
 	}
 
 	var success bool
 	defer func() {
 		if !success {
-			_ = t.soap.MouseUp(sx, sy)
+			_ = t.desktop.MouseUp(sx, sy)
 		}
 	}()
 	time.Sleep(100 * time.Millisecond)
 
-	if err := t.soap.MouseMoveAbsolute(ex, ey); err != nil {
+	if err := t.desktop.MouseMoveAbsolute(ex, ey); err != nil {
 		return nil, err
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	if err := t.soap.MouseUp(ex, ey); err != nil {
+	if err := t.desktop.MouseUp(ex, ey); err != nil {
 		return nil, err
 	}
 	success = true

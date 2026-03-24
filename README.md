@@ -2,12 +2,13 @@
 
 [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?logo=discord&logoColor=white)](https://discord.gg/Bga4QkvEgZ)
 
-A VirtualBox-based tool server for computer-use AI agents. Dexbox runs a Windows 11 VM and exposes an HTTP API that any AI agent (Claude, GPT, Gemini) can call directly — no agent loop, no SDK, just pipe tool calls through.
+A Windows desktop developer tool for creating computer-use AI agents. Dexbox manages Windows desktops — either VirtualBox VMs or external RDP targets — and exposes an HTTP API that any AI agent (Claude, GPT, Gemini) can call directly. No agent loop, no SDK, just pipe tool calls through.
 
 ## Requirements
 
 - [Go 1.24+](https://go.dev/doc/install)
-- [VirtualBox](https://www.virtualbox.org/) (auto-installed by `dexbox create vm`)
+- [VirtualBox](https://www.virtualbox.org/) (auto-installed by `dexbox create vm`) — for VM desktops
+- [Docker](https://www.docker.com/) — for RDP desktops (runs guacd via `docker run`)
 - macOS, Linux, or Windows
 
 ## Quick Start
@@ -26,10 +27,27 @@ The `--iso` is required for ARM hosts like Apple Silicon only.
 dexbox create vm windows-1 --iso /path/to/windows.iso
 ```
 
-Start the tool server
+Start the tool server (also starts vboxwebsrv and guacd if Docker is available)
 
 ```bash
 dexbox start
+```
+
+Bring a desktop online
+
+```bash
+# Boot a VM
+dexbox up windows-1
+
+# Or connect to an RDP target (register it first)
+dexbox rdp add my-server --host 192.168.1.100 --user Administrator --pass secret
+dexbox up my-server
+```
+
+Open the browser-based viewer
+
+```bash
+dexbox view windows-1
 ```
 
 Take a screenshot
@@ -105,18 +123,23 @@ Your Agent Framework (AI SDK, LangChain, Mastra, etc.)
   │  5. Dexbox executes, returns result in the model's format
   v
 Dexbox Tool Server (:8600)
-  ├── /tools  →  model-agnostic JSON Schema for all tools
-  ├── /actions       →  execute a tool action (model-specific format)
-  ├── /actions/batch →  batch sequential actions
-  ├── /vm            →  VM lifecycle (create, start, stop, pause, resume, destroy)
+  ├── /tools               →  model-agnostic JSON Schema for all tools
+  ├── /actions             →  execute a tool action (model-specific format)
+  ├── /actions/batch       →  batch sequential actions
+  ├── /vm                  →  VM lifecycle (create, start, stop, pause, resume, destroy)
+  ├── /desktops            →  list all desktops (VMs + RDP)
+  ├── /desktops/<n>/up     →  bring a desktop online
+  ├── /desktops/<n>/down   →  disconnect / shut down a desktop
+  ├── /desktops/<n>/view   →  browser-based remote desktop viewer (HTML)
+  ├── /desktops/<n>/tunnel →  WebSocket tunnel to guacd (Guacamole protocol)
   └── /health
          │
          ├── computer  →  VBoxManage (screenshots, scancodes) + SOAP (mouse)
          ├── bash      →  VBoxManage guestcontrol → PowerShell
          └── editor    →  VBoxManage guestcontrol → file I/O
                 │
-                v
-         VirtualBox VM (Windows 11, headless)
+                ├── VirtualBox VM (Windows 11, headless)
+                └── RDP target ─── guacd (Docker) ──→ remote host
 ```
 
 ## API
@@ -198,6 +221,36 @@ curl localhost:8600/vm/my-vm/status
 curl -X DELETE localhost:8600/vm/my-vm
 ```
 
+### Desktop lifecycle (VMs and RDP)
+
+A unified API over all desktop types (VMs and RDP connections).
+
+```bash
+# List all desktops
+curl localhost:8600/desktops
+curl 'localhost:8600/desktops?type=vm'
+curl 'localhost:8600/desktops?type=rdp'
+
+# Bring a desktop online
+curl -X POST localhost:8600/desktops/my-desktop/up
+
+# Disconnect (session only, VM keeps running)
+curl -X POST localhost:8600/desktops/my-desktop/down
+
+# Disconnect + ACPI shutdown (VM only)
+curl -X POST 'localhost:8600/desktops/my-desktop/down?shutdown=true'
+
+# Hard poweroff (VM only)
+curl -X POST 'localhost:8600/desktops/my-desktop/down?shutdown=true&force=true'
+
+# Shut everything down
+curl -X POST localhost:8600/desktops/down-all
+curl -X POST 'localhost:8600/desktops/down-all?force=true'
+
+# Browser viewer (returns HTML, open in browser)
+curl localhost:8600/desktops/my-desktop/view
+```
+
 ### Error responses
 
 ```json
@@ -215,24 +268,24 @@ curl -X DELETE localhost:8600/vm/my-vm
 
 | Command                                  | Description                                       |
 | ---------------------------------------- | ------------------------------------------------- |
-| `dexbox start`                           | Start the tool server and vboxwebsrv daemon        |
-| `dexbox stop`                            | Stop the tool server and vboxwebsrv                |
-| `dexbox status`                          | Show VM states                                     |
-| `dexbox create vm <name> [--iso <path>]` | Install VirtualBox and provision a new Windows VM  |
+| `dexbox start`                           | Start the tool server and vboxwebsrv daemon       |
+| `dexbox stop`                            | Stop the tool server and vboxwebsrv               |
+| `dexbox status`                          | Show VM states                                    |
+| `dexbox create vm <name> [--iso <path>]` | Install VirtualBox and provision a new Windows VM |
 
 ### VM commands
 
-| Command                      | Description                        |
-| ---------------------------- | ---------------------------------- |
-| `dexbox vm list`             | List all VMs                       |
-| `dexbox vm start [name]`     | Start a VM                         |
-| `dexbox vm stop [name]`      | Graceful ACPI shutdown             |
-| `dexbox vm poweroff [name]`  | Immediately cut power (force stop) |
-| `dexbox vm pause [name]`     | Freeze VM in memory                |
-| `dexbox vm suspend [name]`   | Save state to disk and power off   |
-| `dexbox vm resume [name]`    | Resume from pause or suspend       |
-| `dexbox vm status [name]`    | Show VM state and guest additions  |
-| `dexbox vm destroy [name]`   | Delete VM and disk                 |
+| Command                     | Description                        |
+| --------------------------- | ---------------------------------- |
+| `dexbox vm list`            | List all VMs                       |
+| `dexbox vm start [name]`    | Start a VM                         |
+| `dexbox vm stop [name]`     | Graceful ACPI shutdown             |
+| `dexbox vm poweroff [name]` | Immediately cut power (force stop) |
+| `dexbox vm pause [name]`    | Freeze VM in memory                |
+| `dexbox vm suspend [name]`  | Save state to disk and power off   |
+| `dexbox vm resume [name]`   | Resume from pause or suspend       |
+| `dexbox vm status [name]`   | Show VM state and guest additions  |
+| `dexbox vm destroy [name]`  | Delete VM and disk                 |
 
 If `[name]` is omitted and exactly one VM exists, it is used automatically.
 
@@ -264,15 +317,15 @@ Built-in adapters: Anthropic (`claude-*`), OpenAI (`gpt-*`, `o1-*`, `o3-*`), Gem
 
 ## Environment Variables
 
-| Variable                   | Default                 | Description              |
-| -------------------------- | ----------------------- | ------------------------ |
-| `DEXBOX_VM_USER`           | `dexbox`                | Guest OS username        |
-| `DEXBOX_VM_PASS`           | `dexbox123`             | Guest OS password        |
-| `DEXBOX_SOAP_ADDR`         | `http://localhost:18083` | vboxwebsrv endpoint     |
-| `DEXBOX_SHARED_DIR`        | `~/.dexbox/shared`      | Host-side shared folder  |
-| `DEXBOX_LISTEN`            | `:8600`                 | Server listen address    |
-| `DEXBOX_SCREENSHOT_WIDTH`  | `1024`                  | Screenshot resize width  |
-| `DEXBOX_SCREENSHOT_HEIGHT` | `768`                   | Screenshot resize height |
+| Variable                   | Default                  | Description              |
+| -------------------------- | ------------------------ | ------------------------ |
+| `DEXBOX_VM_USER`           | `dexbox`                 | Guest OS username        |
+| `DEXBOX_VM_PASS`           | `dexbox123`              | Guest OS password        |
+| `DEXBOX_SOAP_ADDR`         | `http://localhost:18083` | vboxwebsrv endpoint      |
+| `DEXBOX_SHARED_DIR`        | `~/.dexbox/shared`       | Host-side shared folder  |
+| `DEXBOX_LISTEN`            | `:8600`                  | Server listen address    |
+| `DEXBOX_SCREENSHOT_WIDTH`  | `1024`                   | Screenshot resize width  |
+| `DEXBOX_SCREENSHOT_HEIGHT` | `768`                    | Screenshot resize height |
 
 The CLI loads a `.env` file from the current directory automatically. Use `--env-file` to specify a different path.
 
