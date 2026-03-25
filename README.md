@@ -13,10 +13,12 @@ A Windows desktop developer tool for creating computer-use AI agents. Dexbox man
 
 ## Quick Start
 
-Install the CLI
+Clone and install the CLI
 
 ```bash
-go install ./cmd/dexbox
+git clone https://github.com/getnenai/dexbox.git
+cd dexbox
+make
 ```
 
 Provision a Windows 11 VM (downloads ISO, creates VM, runs unattended install)
@@ -68,6 +70,20 @@ Stop when done
 dexbox stop
 ```
 
+### Shared folder
+
+Files in `~/.dexbox/shared/` on the host are accessible inside the Windows VM at `\\vboxsvr\shared\`. This mapping is configured automatically during `dexbox create vm`.
+
+```bash
+# Host → Guest
+echo "hello from host" > ~/.dexbox/shared/test.txt
+# Inside the VM, read it at: \\vboxsvr\shared\test.txt
+
+# Guest → Host
+# Write a file to \\vboxsvr\shared\ inside Windows, then read it on the host:
+cat ~/.dexbox/shared/from-guest.txt
+```
+
 ### Shell completion (macOS + zsh)
 
 Add to `~/.zshrc`:
@@ -82,32 +98,31 @@ Then reload:
 source ~/.zshrc
 ```
 
-## Agent
+## Agents
 
-A TypeScript agent that connects to the dexbox tool server. Supports multiple models:
+Two reference agents are included. Both require a running dexbox instance (`dexbox start`).
 
-- **Claude Sonnet 4.6** (default) — AI SDK tool-use loop
-- **Lux Actor** (`lux-actor-1`) — OpenAGI vision-action loop (fast)
-- **Lux Thinker** (`lux-thinker-1`) — OpenAGI vision-action loop (complex tasks)
+### TypeScript (Vercel AI SDK)
 
-Requires a running dexbox instance (`dexbox start`).
+Supports Claude (default), Lux Actor, and Lux Thinker models.
 
 ```bash
-cd agent
+cd agent/typescript-vercel-ai
 npm install
-cp .env.example .env  # add your ANTHROPIC_API_KEY and/or OAGI_API_KEY
+cp ../.env.example ../.env  # add your ANTHROPIC_API_KEY and/or OAGI_API_KEY
 
-# Claude (default)
 npx tsx src/index.ts "Take a screenshot of the desktop"
-
-# Claude (explicit)
-npx tsx src/index.ts --model claude "Take a screenshot of the desktop"
-
-# Lux Actor
 npx tsx src/index.ts --model lux-actor-1 "Open Edge and go to google.com"
+```
 
-# Lux Thinker
-npx tsx src/index.ts --model lux-thinker-1 "Find the weather in San Francisco"
+### Python (LangChain)
+
+```bash
+cd agent/python-langchain
+uv sync
+cp ../.env.example ../.env  # add your ANTHROPIC_API_KEY
+
+uv run python agent.py
 ```
 
 ## How It Works
@@ -115,7 +130,7 @@ npx tsx src/index.ts --model lux-thinker-1 "Find the weather in San Francisco"
 Dexbox is a **tool server**, not an agent. Your AI agent framework calls the HTTP API with tool actions in the model's native format. Dexbox parses, executes, and returns results — zero translation needed on your side.
 
 ```
-Your Agent Framework (AI SDK, LangChain, Mastra, etc.)
+Your Agent Framework (Vercel AI SDK, LangChain, etc.)
   │  1. GET /tools  →  JSON Schema for all tools
   │  2. Build SDK tool definitions from schema
   │  3. Model returns a tool call
@@ -135,8 +150,7 @@ Dexbox Tool Server (:8600)
   └── /health
          │
          ├── computer  →  VBoxManage (screenshots, scancodes) + SOAP (mouse)
-         ├── bash      →  VBoxManage guestcontrol → PowerShell
-         └── editor    →  VBoxManage guestcontrol → file I/O
+         └── bash      →  VBoxManage guestcontrol → PowerShell
                 │
                 ├── VirtualBox VM (Windows 11, headless)
                 └── RDP target ─── guacd (Docker) ──→ remote host
@@ -152,7 +166,7 @@ Returns model-agnostic JSON Schema for all tools. SDKs use this to dynamically b
 curl localhost:8600/tools
 ```
 
-Response includes full parameter schemas with types, enums, descriptions, and required fields for each tool (computer, bash, text_editor).
+Response includes full parameter schemas with types, enums, descriptions, and required fields for each tool (computer, bash).
 
 ### Execute a tool action
 
@@ -181,9 +195,6 @@ curl -X POST 'localhost:8600/actions?model=claude-sonnet-4-5-20250929' \
 curl -X POST 'localhost:8600/actions?model=claude-sonnet-4-5-20250929' \
   -d '{"type":"bash_20250124","command":"Get-Process | Select-Object -First 5"}'
 
-# View file
-curl -X POST 'localhost:8600/actions?model=claude-sonnet-4-5-20250929' \
-  -d '{"type":"text_editor_20250124","command":"view","path":"C:\\Users\\dexbox\\file.txt"}'
 ```
 
 ### Batch actions
@@ -268,10 +279,20 @@ curl localhost:8600/desktops/my-desktop/view
 
 | Command                                  | Description                                       |
 | ---------------------------------------- | ------------------------------------------------- |
-| `dexbox start`                           | Start the tool server and vboxwebsrv daemon       |
-| `dexbox stop`                            | Stop the tool server and vboxwebsrv               |
-| `dexbox status`                          | Show VM states                                    |
+| `dexbox start`                           | Start the tool server, vboxwebsrv, and guacd      |
+| `dexbox stop`                            | Stop the tool server, vboxwebsrv, and guacd       |
+| `dexbox status`                          | Show VM states and RDP connections                 |
 | `dexbox create vm <name> [--iso <path>]` | Install VirtualBox and provision a new Windows VM |
+
+### Desktop commands
+
+| Command                        | Description                                    |
+| ------------------------------ | ---------------------------------------------- |
+| `dexbox up <name>`             | Bring a desktop online (boot VM or verify RDP) |
+| `dexbox down <name>`           | Disconnect a desktop session                   |
+| `dexbox down --all`            | Shut down all desktops                         |
+| `dexbox list`                  | List all desktops (VMs and RDP)                |
+| `dexbox view <name>`           | Open desktop in the browser                    |
 
 ### VM commands
 
@@ -289,6 +310,14 @@ curl localhost:8600/desktops/my-desktop/view
 
 If `[name]` is omitted and exactly one VM exists, it is used automatically.
 
+### RDP commands
+
+| Command                                                              | Description                 |
+| -------------------------------------------------------------------- | --------------------------- |
+| `dexbox rdp add <name> --host <h> --user <u> --pass <p>`            | Register an RDP connection  |
+| `dexbox rdp remove <name>`                                           | Unregister an RDP connection|
+| `dexbox rdp list`                                                    | List RDP connections        |
+
 ### Tool action commands
 
 ```bash
@@ -297,8 +326,6 @@ dexbox run --type computer --action left_click --coordinate 500,300
 dexbox run --type computer --action type --text "hello"
 dexbox run --type computer --action key --text "ctrl+a"
 dexbox run --type bash --command "dir"
-dexbox run --type text_editor --command view --path "C:\file.txt"
-dexbox run --type text_editor --command create --path "C:\file.txt" --file-text "content"
 ```
 
 ## Multi-Model Support
@@ -357,12 +384,16 @@ flowchart LR
 ### Package overview
 
 ```
-agent/                    Mastra TypeScript agent (AI SDK + dexbox HTTP API)
+agent/
+├── typescript-vercel-ai/  TypeScript agent (Vercel AI SDK)
+├── python-langchain/      Python agent (LangChain)
+└── shared/                Shared modules (Extend parse)
 internal/
 ├── vbox/
 │   ├── cli.go          VBoxManage CLI wrapper
 │   ├── soap.go         SOAP client for mouse control
 │   ├── scancodes.go    PS/2 scancode table
+│   ├── nvram.go        EFI NVRAM patching for ARM boot
 │   ├── manager.go      VM lifecycle orchestration
 │   ├── install.go      Provisioning logic
 │   └── autounattend.xml  Windows answer file (embedded)
@@ -370,13 +401,15 @@ internal/
 │   ├── schema.go       Typed param structs + JSON Schema generator
 │   ├── computer.go     Screenshot, keyboard, mouse via VBox
 │   ├── bash.go         PowerShell via Guest Additions
-│   ├── editor.go       File I/O via shared folders
 │   ├── adapter.go      ModelAdapter interface + registry
 │   ├── adapter_anthropic.go
 │   ├── adapter_openai.go
 │   └── adapter_gemini.go
+├── desktop/              Unified desktop abstraction (VM + RDP)
 ├── server/
 │   └── server.go       HTTP tool server
+├── web/                  Browser-based remote desktop viewer
+├── guacd/                Apache Guacamole (guacd) Docker management
 ├── config/
 │   └── config.go       Environment configuration
 └── logger/
