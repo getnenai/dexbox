@@ -167,17 +167,18 @@ export function luxActionToDexbox(
         console.warn(`Unsupported scroll direction "${dir}"; skipping.`);
         return null;
       }
-      const count = parts.length > 3 ? parseInt(parts[3], 10) || 1 : 1;
-      const scrollDir = dir === "up" ? "scroll_up" : "scroll_down";
-      const actions: Record<string, unknown>[] = [];
-      for (let i = 0; i < count; i++) {
-        actions.push({
+      const rawCount = parts.length > 3 ? parseInt(parts[3], 10) : NaN;
+      const count = Number.isNaN(rawCount) ? 3 : Math.max(1, rawCount);
+      const amount = Math.min(count, 5); // cap to avoid over-scrolling
+      return [
+        {
           type: "computer_20250124",
-          action: scrollDir,
+          action: "scroll",
           coordinate: [x, y],
-        });
-      }
-      return actions;
+          direction: dir,
+          amount: amount,
+        },
+      ];
     }
     case "drag": {
       const parts = args.split(",").map((s) => parseInt(s.trim(), 10));

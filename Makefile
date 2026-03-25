@@ -46,9 +46,8 @@ agent-py-lc-lint: ## Lint the Python LangChain agent with ruff
 agent-ts-vercel-install: ## Install TypeScript Vercel AI agent dependencies
 	cd agent/typescript-vercel-ai && npm ci
 
-agent-ts-vercel-run: ## Run the TypeScript Vercel AI agent (PROMPT=required)
-	@if [ -z "$(PROMPT)" ]; then echo "Usage: make agent-ts-vercel-run PROMPT=\"your instruction\""; exit 1; fi
-	cd agent/typescript-vercel-ai && npx tsx src/index.ts "$(PROMPT)"
+agent-ts-vercel-run: ## Run the TypeScript Vercel AI agent (MODEL=optional, PROMPT=optional)
+	cd agent/typescript-vercel-ai && npx tsx src/index.ts $(if $(MODEL),--model $(MODEL)) $(if $(PROMPT),"$(PROMPT)")
 
 # --- Extend Parse (shared) ---
 
