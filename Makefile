@@ -1,7 +1,7 @@
 .PHONY: all test build-cli install install-cli go-install lint clean help
 .PHONY: agent-py-lc-install agent-py-lc-run agent-py-lc-lint agent-ts-vercel-install agent-ts-vercel-run
 
-all: build-cli ## Default target
+all: install-cli ## Default target (build + install to ~/.local/bin)
 
 test: ## Run Go tests
 	go test ./...

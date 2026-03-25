@@ -315,16 +315,25 @@ func (c *SOAPClient) reconnect() error {
 	return c.Connect(c.vmName, c.soapUser, c.soapPass)
 }
 
-// isStaleRefError returns true if the error indicates an expired SOAP object reference.
-func isStaleRefError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "Invalid managed object reference")
+// IsStaleRefError returns true if the error indicates an expired or broken SOAP session.
+// VBox SOAP sessions can fail in several ways beyond just expired object references:
+// session timeouts, locked sessions from orphaned processes, or general object readiness.
+func IsStaleRefError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Invalid managed object reference") ||
+		strings.Contains(msg, "Session is locked") ||
+		strings.Contains(msg, "Object is not ready") ||
+		strings.Contains(msg, "SOAP call") // connection-level failure
 }
 
 // withReconnect runs fn, and if it fails with a stale reference error,
 // reconnects the SOAP session and retries once.
 func (c *SOAPClient) withReconnect(fn func() error) error {
 	err := fn()
-	if !isStaleRefError(err) || c.vmName == "" {
+	if !IsStaleRefError(err) || c.vmName == "" {
 		return err
 	}
 	if reconnErr := c.reconnect(); reconnErr != nil {

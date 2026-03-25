@@ -491,6 +491,19 @@ func (s *Server) resolveVM(r *http.Request) (string, error) {
 		return name, nil
 	}
 
+	// No name specified and desktop manager has no desktops.
+	// Auto-discover running VMs via VBoxManage as a last resort.
+	vms, listErr := vbox.ListVMs(r.Context())
+	if listErr == nil {
+		for _, vm := range vms {
+			state, _ := vbox.VMState(r.Context(), vm)
+			if state == "running" {
+				log.Printf("[resolveVM] auto-discovered running VM %q", vm)
+				return vm, nil
+			}
+		}
+	}
+
 	return "", err
 }
 
@@ -502,8 +515,8 @@ func (s *Server) executeAction(r *http.Request, vmName string, action *tools.Can
 			return nil, err
 		}
 		result, err := ct.Execute(r.Context(), action)
-		if err != nil && strings.Contains(err.Error(), "Invalid managed object reference") {
-			// SOAP session is stale (e.g. VM rebooted). Reconnect and retry once.
+		if err != nil && vbox.IsStaleRefError(err) {
+			// SOAP session is stale (e.g. VM rebooted, session timeout). Reconnect and retry once.
 			log.Printf("SOAP session stale for VM %q, reconnecting...", vmName)
 			if reconnErr := s.reconnectComputerTool(r, vmName); reconnErr != nil {
 				return nil, fmt.Errorf("reconnect failed: %w (original: %v)", reconnErr, err)
