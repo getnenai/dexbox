@@ -66,7 +66,7 @@ export async function runClaude(prompt: string): Promise<string> {
   const result = await generateText({
     model: anthropic("claude-sonnet-4-6") as any,
     tools,
-    stopWhen: stepCountIs(30),
+    stopWhen: stepCountIs(100),
     system: systemPrompt,
     prompt,
     onStepFinish: ({ toolCalls, toolResults, text }: any) => {

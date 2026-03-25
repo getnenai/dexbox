@@ -37,7 +37,7 @@ def parse_document(
 
     shared_dir = Path(
         shared_dir or os.environ.get("DEXBOX_SHARED_DIR", Path.home() / ".dexbox" / "shared")
-    )
+    ).expanduser()
 
     file_path = Path(file_path)
     abs_path = (file_path if file_path.is_absolute() else shared_dir / file_path).resolve()
@@ -56,11 +56,14 @@ def parse_document(
     }
 
     # Step 1: Upload
+    import mimetypes
+
+    mime_type = mimetypes.guess_type(str(abs_path))[0] or "application/octet-stream"
     with open(abs_path, "rb") as f:
         upload_res = httpx.post(
             f"{API_BASE}/files/upload",
             headers=headers,
-            files={"file": (abs_path.name, f)},
+            files={"file": (abs_path.name, f, mime_type)},
             timeout=TIMEOUT,
         )
 
@@ -75,7 +78,7 @@ def parse_document(
     parse_res = httpx.post(
         f"{API_BASE}/parse",
         headers={**headers, "Content-Type": "application/json"},
-        json={"file": {"fileId": file_id}},
+        json={"file": {"id": file_id}},
         timeout=TIMEOUT,
     )
 
@@ -86,7 +89,8 @@ def parse_document(
 
     raw = parse_res.json()
 
-    chunks = raw.get("chunks", [])
+    output = raw.get("output") or {}
+    chunks = output.get("chunks", []) if isinstance(output, dict) else []
     markdown = "\n\n".join(
         c.get("content", "") for c in chunks if isinstance(c, dict) and c.get("content")
     )

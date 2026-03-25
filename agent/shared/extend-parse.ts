@@ -22,10 +22,13 @@ export async function parseDocument(
     );
   }
 
-  const sharedDir =
+  const rawSharedDir =
     options?.sharedDir ??
     process.env.DEXBOX_SHARED_DIR ??
     join(homedir(), ".dexbox", "shared");
+  const sharedDir = rawSharedDir.startsWith("~")
+    ? join(homedir(), rawSharedDir.slice(1))
+    : rawSharedDir;
 
   const absPath = resolve(filePath.startsWith("/") ? filePath : join(sharedDir, filePath));
   const sharedRoot = resolve(sharedDir);
@@ -68,7 +71,7 @@ export async function parseDocument(
   const parseRes = await fetch(`${API_BASE}/parse`, {
     method: "POST",
     headers: { ...headers, "Content-Type": "application/json" },
-    body: JSON.stringify({ file: { fileId } }),
+    body: JSON.stringify({ file: { id: fileId } }),
     signal: AbortSignal.timeout(300_000),
   });
 
@@ -79,7 +82,8 @@ export async function parseDocument(
 
   const raw = (await parseRes.json()) as Record<string, unknown>;
 
-  const chunks = (raw.chunks ?? []) as Array<Record<string, unknown>>;
+  const output = (raw.output ?? {}) as Record<string, unknown>;
+  const chunks = ((output.chunks ?? []) as Array<Record<string, unknown>>);
   const markdown = chunks
     .filter((c) => typeof c.content === "string" && c.content)
     .map((c) => c.content as string)
