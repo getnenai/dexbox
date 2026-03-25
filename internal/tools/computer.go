@@ -45,7 +45,7 @@ func (t *ComputerTool) Execute(ctx context.Context, action *CanonicalAction) (*C
 	switch action.Action {
 	case "screenshot":
 		return t.screenshot(ctx)
-	case "left_click":
+	case "left_click", "click":
 		return t.click(ctx, p.Coordinate, 1)
 	case "right_click":
 		return t.click(ctx, p.Coordinate, 2)

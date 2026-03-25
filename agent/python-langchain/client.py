@@ -57,6 +57,8 @@ def call_dexbox(tool_call: dict) -> dict:
         json=tool_call,
         timeout=_TIMEOUT,
     )
+    if r.status_code >= 400:
+        print(f"  [dexbox] HTTP {r.status_code}: {r.text}", flush=True)
     r.raise_for_status()
 
     data = r.json()
