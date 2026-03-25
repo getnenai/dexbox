@@ -32,7 +32,7 @@ type Server struct {
 	computers    map[string]*tools.ComputerTool
 	computerDskt map[string]desktop.Desktop // desktop used to create each cached ComputerTool
 	bashes       map[string]*tools.BashTool
-	editors      map[string]*tools.EditorTool
+
 }
 
 // Options configures the tool server.
@@ -71,7 +71,7 @@ func New(opts Options) *Server {
 		computers:    make(map[string]*tools.ComputerTool),
 		computerDskt: make(map[string]desktop.Desktop),
 		bashes:       make(map[string]*tools.BashTool),
-		editors:      make(map[string]*tools.EditorTool),
+
 	}
 }
 
@@ -549,9 +549,7 @@ func (s *Server) executeAction(r *http.Request, vmName string, action *tools.Can
 			return nil, err
 		}
 		return &tools.CanonicalResult{Output: out}, nil
-	case "text_editor":
-		et := s.getEditorTool(vmName)
-		return et.Execute(r.Context(), action)
+
 	default:
 		return nil, fmt.Errorf("unknown tool %q", action.Tool)
 	}
@@ -682,23 +680,7 @@ func (s *Server) getBashTool(vmName string) *tools.BashTool {
 	return bt
 }
 
-func (s *Server) getEditorTool(vmName string) *tools.EditorTool {
-	s.toolsMu.RLock()
-	et, ok := s.editors[vmName]
-	s.toolsMu.RUnlock()
-	if ok {
-		return et
-	}
-	et = tools.NewEditorTool(vmName, s.vmUser, s.vmPass, s.shared)
-	s.toolsMu.Lock()
-	if existing, ok := s.editors[vmName]; ok {
-		s.toolsMu.Unlock()
-		return existing
-	}
-	s.editors[vmName] = et
-	s.toolsMu.Unlock()
-	return et
-}
+
 
 // --- Unified desktop routes ---
 

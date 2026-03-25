@@ -72,7 +72,6 @@ func newTestServer(t *testing.T) *Server {
 		computers:    make(map[string]*tools.ComputerTool),
 		computerDskt: make(map[string]desktop.Desktop),
 		bashes:       make(map[string]*tools.BashTool),
-		editors:      make(map[string]*tools.EditorTool),
 	}
 }
 

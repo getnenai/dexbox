@@ -60,11 +60,6 @@ var ToolRegistry = []ToolDef{
 		Description: "Run a PowerShell command on the Windows guest VM.",
 		ParamType:   BashParams{},
 	},
-	{
-		Name:        "text_editor",
-		Description: "View and edit files on the Windows guest VM.",
-		ParamType:   EditorParams{},
-	},
 }
 
 // AllToolSchemas generates JSON Schemas for all registered tools.

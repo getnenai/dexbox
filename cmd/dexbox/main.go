@@ -831,10 +831,6 @@ func cmdRunAction() *cobra.Command {
 		coordinate  string
 		text        string
 		command     string
-		path        string
-		fileText    string
-		oldStr      string
-		newStr      string
 		vmName      string
 		desktopName string
 	)
@@ -859,10 +855,6 @@ Tool types and their actions:
 
   bash (VM only)
     --command <ps1>   Run a PowerShell command on the guest and print output
-
-  text_editor (VM only)
-    --command view    --path <guest-path>
-    --command create  --path <guest-path> --file-text <content>
 
 Examples:
   dexbox run --type computer --action screenshot > screen.png
@@ -921,26 +913,17 @@ Examples:
 				}
 				fmt.Print(out)
 				return nil
-			case "text_editor":
-				if d.Type() == "rdp" {
-					return fmt.Errorf("text_editor tool is not supported for RDP connections (only VMs with Guest Additions)")
-				}
-				return runEditorAction(ctx, name, command, path, fileText, oldStr, newStr)
 			default:
-				return fmt.Errorf("unknown tool type %q (use: computer, bash, text_editor)", toolType)
+				return fmt.Errorf("unknown tool type %q (use: computer, bash)", toolType)
 			}
 		},
 	}
 
-	cmd.Flags().StringVar(&toolType, "type", "", "Tool type: computer, bash, or text_editor (required)")
+	cmd.Flags().StringVar(&toolType, "type", "", "Tool type: computer or bash (required)")
 	cmd.Flags().StringVar(&action, "action", "", "Computer action: screenshot, left_click, right_click, middle_click, double_click, mouse_move, scroll, type, key")
 	cmd.Flags().StringVar(&coordinate, "coordinate", "", "Mouse position as x,y (required for click/move/scroll actions)")
 	cmd.Flags().StringVar(&text, "text", "", "Text to type or key to press (required for type/key actions)")
-	cmd.Flags().StringVar(&command, "command", "", "PowerShell command (bash) or editor operation: view, create")
-	cmd.Flags().StringVar(&path, "path", "", "Guest file path (required for text_editor actions)")
-	cmd.Flags().StringVar(&fileText, "file-text", "", "File content to write (required for text_editor create)")
-	cmd.Flags().StringVar(&oldStr, "old-str", "", "String to replace (text_editor str_replace)")
-	cmd.Flags().StringVar(&newStr, "new-str", "", "Replacement string (text_editor str_replace)")
+	cmd.Flags().StringVar(&command, "command", "", "PowerShell command (bash)")
 	cmd.Flags().StringVar(&desktopName, "desktop", "", "Desktop name (VM or RDP connection)")
 	cmd.Flags().StringVar(&vmName, "vm", "", "VM name (deprecated, use --desktop)")
 	_ = cmd.MarkFlagRequired("type")
@@ -994,42 +977,7 @@ func runComputerAction(ctx context.Context, d desktop.Desktop, action, coordinat
 	}
 }
 
-func runEditorAction(ctx context.Context, vmName, command, path, fileText, oldStr, newStr string) error {
-	switch command {
-	case "view":
-		out, err := vbox.GuestRun(ctx, vmName, config.VMUser, config.VMPass,
-			"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-			"-NoProfile", "-NonInteractive", "-Command",
-			fmt.Sprintf("Get-Content -Raw '%s'", path))
-		if err != nil {
-			return err
-		}
-		fmt.Print(out)
-		return nil
-	case "create":
-		tmpPath := fmt.Sprintf("%s/dexbox-tmp-%d.txt", config.SharedDir, os.Getpid())
-		if err := os.MkdirAll(config.SharedDir, 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(tmpPath, []byte(fileText), 0o644); err != nil {
-			return err
-		}
-		defer os.Remove(tmpPath)
 
-		guestShared := fmt.Sprintf("\\\\vboxsvr\\shared\\dexbox-tmp-%d.txt", os.Getpid())
-		_, err := vbox.GuestRun(ctx, vmName, config.VMUser, config.VMPass,
-			"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-			"-NoProfile", "-NonInteractive", "-Command",
-			fmt.Sprintf("Copy-Item '%s' '%s' -Force", guestShared, path))
-		if err != nil {
-			return err
-		}
-		fmt.Printf("Created %s\n", path)
-		return nil
-	default:
-		return fmt.Errorf("unknown editor command %q", command)
-	}
-}
 
 func parseCoordinate(s string) (int, int, error) {
 	parts := strings.SplitN(s, ",", 2)
