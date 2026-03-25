@@ -40,9 +40,14 @@ def parse_document(
     )
 
     file_path = Path(file_path)
-    abs_path = file_path if file_path.is_absolute() else shared_dir / file_path
+    abs_path = (file_path if file_path.is_absolute() else shared_dir / file_path).resolve()
+    shared_root = shared_dir.resolve()
+    try:
+        abs_path.relative_to(shared_root)
+    except ValueError:
+        raise ValueError(f"Invalid file path (outside shared dir): {file_path}") from None
 
-    if not abs_path.exists():
+    if not abs_path.is_file():
         raise FileNotFoundError(f"File not found: {abs_path}")
 
     headers = {
@@ -82,7 +87,9 @@ def parse_document(
     raw = parse_res.json()
 
     chunks = raw.get("chunks", [])
-    markdown = "\n\n".join(c["content"] for c in chunks)
+    markdown = "\n\n".join(
+        c.get("content", "") for c in chunks if isinstance(c, dict) and c.get("content")
+    )
 
     # Write output
     parsed_dir = shared_dir / "parsed"

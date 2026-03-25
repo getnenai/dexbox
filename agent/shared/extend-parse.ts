@@ -28,6 +28,10 @@ export async function parseDocument(
     join(homedir(), ".dexbox", "shared");
 
   const absPath = resolve(filePath.startsWith("/") ? filePath : join(sharedDir, filePath));
+  const sharedRoot = resolve(sharedDir);
+  if (!absPath.startsWith(sharedRoot + "/") && absPath !== sharedRoot) {
+    throw new Error(`Invalid file path (outside shared dir): ${filePath}`);
+  }
 
   let fileBytes: Buffer;
   try {
@@ -49,6 +53,7 @@ export async function parseDocument(
     method: "POST",
     headers,
     body: form,
+    signal: AbortSignal.timeout(300_000),
   });
 
   if (!uploadRes.ok) {
@@ -74,8 +79,11 @@ export async function parseDocument(
 
   const raw = (await parseRes.json()) as Record<string, unknown>;
 
-  const chunks = (raw.chunks ?? []) as Array<{ content: string }>;
-  const markdown = chunks.map((c) => c.content).join("\n\n");
+  const chunks = (raw.chunks ?? []) as Array<Record<string, unknown>>;
+  const markdown = chunks
+    .filter((c) => typeof c.content === "string" && c.content)
+    .map((c) => c.content as string)
+    .join("\n\n");
 
   // Write output
   const parsedDir = join(sharedDir, "parsed");
