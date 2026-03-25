@@ -20,16 +20,6 @@ type BashParams struct {
 	Command string `json:"command" required:"true" description:"PowerShell command to execute"`
 }
 
-// EditorParams defines the parameters for the text_editor tool.
-type EditorParams struct {
-	Command    string  `json:"command" enum:"view,create,str_replace,insert" required:"true" description:"The editor operation to perform"`
-	Path       string  `json:"path" required:"true" description:"Guest file path (Windows format, e.g. C:\\Users\\dexbox\\file.txt)"`
-	FileText   string  `json:"file_text,omitempty" description:"File content for create command"`
-	OldStr     string  `json:"old_str,omitempty" description:"Text to find for str_replace (must be unique in file)"`
-	NewStr     string  `json:"new_str,omitempty" description:"Replacement text for str_replace or text to add for insert"`
-	InsertLine *int `json:"insert_line,omitempty" description:"Line number for insert command"`
-}
-
 // ToolSchema represents a tool's full schema for the GET /tools endpoint.
 type ToolSchema struct {
 	Name        string         `json:"name"`
@@ -59,11 +49,6 @@ var ToolRegistry = []ToolDef{
 		Name:        "bash",
 		Description: "Run a PowerShell command on the Windows guest VM.",
 		ParamType:   BashParams{},
-	},
-	{
-		Name:        "text_editor",
-		Description: "View and edit files on the Windows guest VM.",
-		ParamType:   EditorParams{},
 	},
 }
 

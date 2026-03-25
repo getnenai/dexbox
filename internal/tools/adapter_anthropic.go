@@ -35,13 +35,7 @@ func (a *AnthropicAdapter) ToolDefinitions(capabilities []string, display Displa
 		defs = append(defs, def)
 	}
 
-	if capSet["text_editor"] {
-		def, _ := json.Marshal(map[string]any{
-			"type": "text_editor_20250124",
-			"name": "str_replace_based_editor",
-		})
-		defs = append(defs, def)
-	}
+
 
 	return defs
 }
@@ -59,8 +53,7 @@ func (a *AnthropicAdapter) ParseToolCall(raw json.RawMessage) (*CanonicalAction,
 		return a.parseComputer(call)
 	case "bash_20250124":
 		return a.parseBash(call)
-	case "text_editor_20250124":
-		return a.parseEditor(call)
+
 	default:
 		return nil, fmt.Errorf("unknown tool type %q", toolType)
 	}
@@ -107,25 +100,7 @@ func (a *AnthropicAdapter) parseBash(call map[string]any) (*CanonicalAction, err
 	}, nil
 }
 
-func (a *AnthropicAdapter) parseEditor(call map[string]any) (*CanonicalAction, error) {
-	command, _ := call["command"].(string)
-	if command == "" {
-		return nil, fmt.Errorf("field 'command' required for text_editor tool")
-	}
 
-	params := map[string]any{"command": command}
-	for _, key := range []string{"path", "file_text", "old_str", "new_str", "insert_line", "view_range"} {
-		if v, ok := call[key]; ok {
-			params[key] = v
-		}
-	}
-
-	return &CanonicalAction{
-		Tool:   "text_editor",
-		Action: command,
-		Params: params,
-	}, nil
-}
 
 func (a *AnthropicAdapter) FormatResult(action *CanonicalAction, result *CanonicalResult) (json.RawMessage, error) {
 	resp := map[string]any{}
@@ -142,9 +117,7 @@ func (a *AnthropicAdapter) FormatResult(action *CanonicalAction, result *Canonic
 	case "bash":
 		resp["type"] = "bash_20250124"
 		resp["output"] = result.Output
-	case "text_editor":
-		resp["type"] = "text_editor_20250124"
-		resp["output"] = result.Output
+
 	}
 
 	return json.Marshal(resp)
