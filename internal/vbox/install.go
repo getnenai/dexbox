@@ -104,7 +104,9 @@ func Install(ctx context.Context, vmName, isoOverride string) error {
 	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
 		return fmt.Errorf("create shared dir: %w", err)
 	}
-	_ = AddSharedFolder(ctx, vmName, "shared", sharedDir)
+	if err := AddSharedFolder(ctx, vmName, "shared", sharedDir); err != nil {
+		return fmt.Errorf("add shared folder: %w", err)
+	}
 
 	// Step 7: Done
 	fmt.Println("")
