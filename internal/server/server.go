@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -563,11 +564,70 @@ func (s *Server) getComputerTool(r *http.Request, name string) (*tools.ComputerT
 	}
 
 	ct = tools.NewComputerTool(d, s.display.Width, s.display.Height)
+	ct.GuestScroll = s.buildGuestScrollFunc(name)
 	s.toolsMu.Lock()
 	s.computers[name] = ct
 	s.computerDskt[name] = d
 	s.toolsMu.Unlock()
 	return ct, nil
+}
+
+// buildGuestScrollFunc returns a GuestScrollFunc that scrolls via
+// PowerShell mouse_event inside the guest, bypassing broken SOAP mouse scroll.
+//
+// VBox's SOAP putMouseEvent/putMouseEventAbsolute dz parameter is silently
+// dropped when Guest Additions is installed (known VBox bug). This workaround
+// injects scroll events directly via Win32 mouse_event from inside the guest.
+//
+// VBoxManage guestcontrol spawns processes in a non-interactive window station,
+// so we must first switch to WinSta0 (the interactive desktop) before calling
+// SetCursorPos and mouse_event.
+func (s *Server) buildGuestScrollFunc(vmName string) tools.GuestScrollFunc {
+	return func(ctx context.Context, x, y, delta int) error {
+		bt := s.getBashTool(vmName)
+
+		// This script is copied verbatim from the tested debug_scroll3.py.
+		// Do NOT change the formatting — the exact line breaks and quoting matter
+		// for PowerShell's Add-Type -MemberDefinition parsing.
+		script := fmt.Sprintf(`
+Add-Type -MemberDefinition '
+[DllImport("user32.dll", SetLastError = true)]
+public static extern IntPtr OpenWindowStation(string lpszWinSta, bool fInherit, uint dwDesiredAccess);
+[DllImport("user32.dll", SetLastError = true)]
+public static extern bool SetProcessWindowStation(IntPtr hWinSta);
+[DllImport("user32.dll", SetLastError = true)]
+public static extern bool SetCursorPos(int X, int Y);
+[DllImport("user32.dll")]
+public static extern void mouse_event(uint dwFlags, int dx, int dy, int dwData, IntPtr dwExtraInfo);
+' -Name W32 -Namespace Scroll -ErrorAction SilentlyContinue
+
+$winsta = [Scroll.W32]::OpenWindowStation("WinSta0", $false, 0x37F)
+if ($winsta -eq [IntPtr]::Zero) {
+  throw "OpenWindowStation('WinSta0') failed (returned NULL)"
+}
+$ok = [Scroll.W32]::SetProcessWindowStation($winsta)
+if (-not $ok) {
+  $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+  throw "SetProcessWindowStation failed (Win32 error $code)"
+}
+$ok = [Scroll.W32]::SetCursorPos(%d, %d)
+if (-not $ok) {
+  $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+  throw "SetCursorPos(%d, %d) failed (Win32 error $code)"
+}
+Start-Sleep -Milliseconds 200
+[Scroll.W32]::mouse_event(0x0800, 0, 0, %d, [IntPtr]::Zero)
+`, x, y, x, y, delta)
+
+		log.Printf("[scroll] sending script (%d bytes) to VM %q at (%d,%d) delta=%d", len(script), vmName, x, y, delta)
+		out, err := bt.Execute(ctx, script, 15*time.Second)
+		if err != nil {
+			log.Printf("[scroll] error: %v", err)
+		} else {
+			log.Printf("[scroll] OK: %q", out)
+		}
+		return err
+	}
 }
 
 // reconnectComputerTool forces a fresh SOAP session and invalidates the cached tool.

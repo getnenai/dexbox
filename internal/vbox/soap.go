@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -137,14 +138,33 @@ func (c *SOAPClient) MouseDoubleClick(x, y, buttonMask int) error {
 	return c.MouseClick(x, y, buttonMask)
 }
 
-// MouseScroll moves to (x,y) then sends vertical scroll.
+// MouseScroll moves to (x,y) then sends vertical scroll events.
+// Uses both putMouseEventAbsolute and putMouseEvent to maximize
+// compatibility across different Guest Additions configurations.
 func (c *SOAPClient) MouseScroll(x, y, dz int) error {
-	return c.withReconnect(func() error {
-		if err := c.putMouseEventAbsolute(c.mouseRef, x, y, 0, 0, 0); err != nil {
+	log.Printf("[scroll] x=%d y=%d dz=%d", x, y, dz)
+	step := 1
+	if dz < 0 {
+		step = -1
+		dz = -dz
+	}
+	for i := 0; i < dz; i++ {
+		if err := c.withReconnect(func() error {
+			// Try absolute API (works when GA mouse integration is active)
+			if err := c.putMouseEventAbsolute(c.mouseRef, x, y, step, 0, 0); err != nil {
+				return err
+			}
+			// Also send via relative API (works when mouse integration is off)
+			_ = c.putMouseEvent(c.mouseRef, 0, 0, step, 0, 0)
+			return nil
+		}); err != nil {
 			return err
 		}
-		return c.putMouseEvent(c.mouseRef, 0, 0, dz, 0, 0)
-	})
+		if i < dz-1 {
+			time.Sleep(15 * time.Millisecond)
+		}
+	}
+	return nil
 }
 
 // MouseDown presses the button at (x,y) without releasing.

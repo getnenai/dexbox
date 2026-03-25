@@ -13,16 +13,21 @@ import (
 	"golang.org/x/image/draw"
 )
 
+// GuestScrollFunc scrolls inside the VM by running a command in the guest.
+// Parameters: ctx, x, y (screen coords), delta (±120 per notch).
+type GuestScrollFunc func(ctx context.Context, x, y, delta int) error
+
 // ComputerTool executes computer-use actions (screenshot, keyboard, mouse)
 // against any Desktop backend (VBox, RDP, etc.).
 type ComputerTool struct {
-	desktop  desktop.Desktop
-	width    int
-	height   int
-	cursorX  int
-	cursorY  int
-	displayW int // actual VM display dimensions (what SOAP uses), set on first screenshot
-	displayH int
+	desktop     desktop.Desktop
+	width       int
+	height      int
+	cursorX     int
+	cursorY     int
+	displayW    int // actual VM display dimensions (what SOAP uses), set on first screenshot
+	displayH    int
+	GuestScroll GuestScrollFunc // optional: scroll via guest-side PowerShell instead of SOAP
 }
 
 // NewComputerTool creates a computer tool bound to a Desktop.
@@ -163,26 +168,47 @@ func (t *ComputerTool) mouseMove(ctx context.Context, coord *[2]int) (*Canonical
 }
 
 func (t *ComputerTool) scroll(ctx context.Context, coord *[2]int, direction string, amount int) (*CanonicalResult, error) {
+	// If no coordinate given, use the last-known cursor position.
+	// LLMs commonly call "scroll down" without specifying a coordinate.
 	if coord == nil {
-		return nil, fmt.Errorf("field 'coordinate' required for scroll action")
+		coord = &[2]int{t.cursorX, t.cursorY}
 	}
 	t.cursorX, t.cursorY = coord[0], coord[1]
 	sc := t.scaleCoord(coord)
 
-	dz := amount
-	if dz == 0 {
-		dz = 3
+	notches := amount
+	if notches < 0 {
+		return nil, fmt.Errorf("invalid scroll amount %d; expected >= 0", amount)
+	}
+	if notches == 0 {
+		notches = 3
 	}
 
+	// WHEEL_DELTA = 120 per notch (Windows convention).
+	// Positive = scroll up, negative = scroll down.
+	delta := notches * 120
 	switch direction {
 	case "down", "":
-		dz = -dz
+		delta = -delta
 	case "up":
-		// dz stays positive
+		// delta stays positive
 	default:
 		return nil, fmt.Errorf("invalid scroll direction %q; expected 'up' or 'down'", direction)
 	}
 
+	// Use guest-side PowerShell if available (bypasses broken SOAP scroll).
+	if t.GuestScroll != nil {
+		if err := t.GuestScroll(ctx, sc[0], sc[1], delta); err != nil {
+			return nil, err
+		}
+		return &CanonicalResult{}, nil
+	}
+
+	// Fallback to SOAP (works for RDP backend, broken for VBox+GA).
+	dz := notches
+	if direction == "down" || direction == "" {
+		dz = -dz
+	}
 	if err := t.desktop.MouseScroll(sc[0], sc[1], dz); err != nil {
 		return nil, err
 	}
