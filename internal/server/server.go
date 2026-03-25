@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +17,8 @@ import (
 	"github.com/getnenai/dexbox/internal/vbox"
 	"github.com/getnenai/dexbox/internal/web"
 )
+
+var errUnknownTool = errors.New("unknown tool")
 
 // Server is the dexbox tool server.
 type Server struct {
@@ -194,8 +197,14 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.executeAction(r, vmName, action)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error":   "tool_error",
+		status := http.StatusInternalServerError
+		code := "tool_error"
+		if errors.Is(err, errUnknownTool) {
+			status = http.StatusBadRequest
+			code = "bad_request"
+		}
+		writeJSON(w, status, map[string]any{
+			"error":   code,
 			"message": err.Error(),
 		})
 		return
@@ -272,8 +281,12 @@ func (s *Server) handleBatchAction(w http.ResponseWriter, r *http.Request) {
 
 		result, err := s.executeAction(r, vmName, action)
 		if err != nil {
+			code := "tool_error"
+			if errors.Is(err, errUnknownTool) {
+				code = "bad_request"
+			}
 			errJSON, _ := json.Marshal(map[string]any{
-				"error":   "tool_error",
+				"error":   code,
 				"message": err.Error(),
 			})
 			results = append(results, errJSON)
@@ -551,7 +564,7 @@ func (s *Server) executeAction(r *http.Request, vmName string, action *tools.Can
 		return &tools.CanonicalResult{Output: out}, nil
 
 	default:
-		return nil, fmt.Errorf("unknown tool %q", action.Tool)
+		return nil, fmt.Errorf("%w %q", errUnknownTool, action.Tool)
 	}
 }
 

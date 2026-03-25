@@ -43,8 +43,8 @@ func main() {
 		Short: "dexbox — VirtualBox-based computer-use tool server",
 		Long: `dexbox is a VirtualBox-based computer-use tool server.
 
-It manages Windows VMs and exposes an HTTP API for computer-use actions
-(screenshots, mouse, keyboard, file operations) used by AI workflows.
+It manages Windows VMs and exposes an HTTP API for supported computer-use actions
+(screenshots, mouse, keyboard, and guest shell commands) used by AI workflows.
 
 Environment variables (or .env file):
   DEXBOX_VM_USER           Guest OS username (default: dexbox)
