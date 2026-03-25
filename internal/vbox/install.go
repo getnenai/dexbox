@@ -78,7 +78,10 @@ func Install(ctx context.Context, vmName, isoOverride string) error {
 
 	// Step 5: Configure shared folder (must happen while VM is powered off
 	// so the mapping is permanent rather than transient)
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
 	sharedDir := filepath.Join(home, ".dexbox", "shared")
 	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
 		return fmt.Errorf("create shared dir: %w", err)
