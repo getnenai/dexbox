@@ -586,7 +586,9 @@ func (s *Server) getComputerTool(r *http.Request, name string) (*tools.ComputerT
 	}
 
 	ct = tools.NewComputerTool(d, s.display.Width, s.display.Height)
-	ct.GuestScroll = s.buildGuestScrollFunc(name)
+	if d.Type() == "vm" {
+		ct.GuestScroll = s.buildGuestScrollFunc(name)
+	}
 	s.toolsMu.Lock()
 	s.computers[name] = ct
 	s.computerDskt[name] = d
