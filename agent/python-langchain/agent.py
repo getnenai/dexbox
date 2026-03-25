@@ -10,6 +10,7 @@ Requires:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -18,12 +19,13 @@ from langchain.agents import create_agent
 
 from client import DEXBOX_MODEL, fetch_tool_schemas, health_check
 from tools import build_tools_from_schema
+from tools.extend import build_parse_tool
 
 # Load .env from the agent/ directory (one level up from python-langchain/)
 _AGENT_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(_AGENT_DIR / ".env")
 
-SYSTEM_PROMPT = """\
+BASE_SYSTEM_PROMPT = """\
 You are a computer-use agent controlling a Windows VM through dexbox.
 
 Guidelines:
@@ -34,6 +36,13 @@ Guidelines:
 - Be patient — VM operations can be slow; wait and retry if needed
 - When clicking, target the center of UI elements
 - For typing, first click on the target input field
+"""
+
+PARSE_TOOL_ADDENDUM = """\
+- parse_document: Parse a document file (PDF, image, etc.) and return its \
+content as markdown. This tool runs on the host, not inside the VM. Files in \
+the VM's \\\\vboxsvr\\shared\\ folder are in the tool's default lookup \
+directory — just pass the filename.
 """
 
 
@@ -53,6 +62,13 @@ def main():
     print("Loading tools from dexbox...")
     schemas = fetch_tool_schemas()
     all_tools = build_tools_from_schema(schemas)
+
+    # Conditionally add the Extend parse tool
+    system_prompt = BASE_SYSTEM_PROMPT
+    if os.environ.get("EXTEND_API_KEY"):
+        all_tools.append(build_parse_tool())
+        system_prompt += PARSE_TOOL_ADDENDUM
+
     tool_names = [t.name for t in all_tools]
     print(f"Loaded {len(all_tools)} tools: {', '.join(tool_names)}")
     print()
@@ -66,7 +82,7 @@ def main():
     agent = create_agent(
         model=model,
         tools=all_tools,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt,
     )
 
     print("Type your instruction (or 'quit' to exit):")
