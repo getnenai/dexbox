@@ -1,5 +1,6 @@
 .PHONY: all test build-cli install install-cli go-install lint clean help
 .PHONY: agent-py-lc-install agent-py-lc-run agent-py-lc-lint agent-ts-vercel-install agent-ts-vercel-run
+.PHONY: extend-parse-ts extend-parse-py
 
 all: build-cli ## Default target
 
@@ -50,6 +51,16 @@ agent-ts-vercel-install: ## Install TypeScript Vercel AI agent dependencies
 agent-ts-vercel-run: ## Run the TypeScript Vercel AI agent (PROMPT=required)
 	@if [ -z "$(PROMPT)" ]; then echo "Usage: make agent-ts-vercel-run PROMPT=\"your instruction\""; exit 1; fi
 	cd agent/typescript-vercel-ai && npx tsx src/index.ts "$(PROMPT)"
+
+# --- Extend Parse (shared) ---
+
+extend-parse-ts: ## Parse a document via Extend (TS). FILE=required
+	@if [ -z "$(FILE)" ]; then echo "Usage: make extend-parse-ts FILE=myfile.pdf"; exit 1; fi
+	cd agent/typescript-vercel-ai && npx tsx ../shared/extend-parse.ts "$(FILE)"
+
+extend-parse-py: ## Parse a document via Extend (Python). FILE=required
+	@if [ -z "$(FILE)" ]; then echo "Usage: make extend-parse-py FILE=myfile.pdf"; exit 1; fi
+	cd agent/python-langchain && uv run python ../shared/extend_parse.py "$(FILE)"
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
