@@ -136,6 +136,28 @@ func (s *Server) Run() error {
 		})
 	})
 
+	// Auto-connect running VMs so agents can use them immediately.
+	go func() {
+		listCtx, listCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer listCancel()
+		desktops, err := s.desktops.List(listCtx, "vm")
+		if err != nil {
+			log.Printf("auto-connect: failed to list VMs: %v", err)
+			return
+		}
+		for _, d := range desktops {
+			if d.State == "running" && !d.Connected {
+				upCtx, upCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				if err := s.desktops.Up(upCtx, d.Name); err != nil {
+					log.Printf("auto-connect %s: %v", d.Name, err)
+				} else {
+					log.Printf("auto-connected desktop %s", d.Name)
+				}
+				upCancel()
+			}
+		}
+	}()
+
 	log.Printf("dexbox tool server listening on %s", s.listen)
 	return http.ListenAndServe(s.listen, mux)
 }
