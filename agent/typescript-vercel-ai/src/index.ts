@@ -1,6 +1,7 @@
 import { config } from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { createInterface } from "readline";
 
 // Load .env from the agent/ directory (two levels up from src/)
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -34,15 +35,20 @@ function parseArgs(): { model: string; prompt: string } {
   return { model, prompt };
 }
 
+async function runPrompt(model: string, prompt: string): Promise<void> {
+  let result: string;
+  if (model === "claude") {
+    result = await runClaude(prompt);
+  } else {
+    result = await runLux(prompt, model as LuxModel);
+  }
+
+  console.log("\n--- Result ---");
+  console.log(result);
+}
+
 async function main() {
   const { model, prompt } = parseArgs();
-
-  if (!prompt) {
-    console.error(
-      "Usage: npx tsx src/index.ts [--model claude|lux-actor-1|lux-thinker-1] <prompt>"
-    );
-    process.exit(1);
-  }
 
   // Validate model
   if (model !== "claude" && !isLuxModel(model)) {
@@ -77,15 +83,50 @@ async function main() {
     process.exit(1);
   }
 
-  let result: string;
-  if (model === "claude") {
-    result = await runClaude(prompt);
-  } else {
-    result = await runLux(prompt, model as LuxModel);
+  // If a prompt was passed on the command line, run it as a one-shot
+  if (prompt) {
+    console.log(`Running with ${model}: "${prompt}"`);
+    await runPrompt(model, prompt);
+    return;
   }
 
-  console.log("\n--- Result ---");
-  console.log(result);
+  // Interactive REPL mode
+  console.log(`dexbox Vercel AI Agent`);
+  console.log(`   Model: ${model}`);
+  console.log();
+  console.log("Type your instruction (or 'quit' to exit):");
+  console.log();
+
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const askQuestion = (): void => {
+    rl.question("> ", async (line) => {
+      const input = line.trim();
+      if (!input) {
+        askQuestion();
+        return;
+      }
+      if (["quit", "exit", "q"].includes(input.toLowerCase())) {
+        console.log("Bye!");
+        rl.close();
+        return;
+      }
+
+      try {
+        await runPrompt(model, input);
+      } catch (err) {
+        console.error(err);
+      }
+      console.log();
+      askQuestion();
+    });
+  };
+
+  rl.on("close", () => process.exit(0));
+  askQuestion();
 }
 
 main().catch((err) => {
