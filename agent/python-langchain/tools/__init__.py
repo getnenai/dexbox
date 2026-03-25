@@ -11,13 +11,12 @@ from pydantic import create_model
 from client import call_dexbox, call_dexbox_raw
 
 # Tools to exclude from dynamic loading
-_EXCLUDE_TOOLS = {"text_editor"}
+_EXCLUDE_TOOLS: set[str] = set()
 
 # Map from schema tool name → Anthropic wire-format type used by POST /actions
 _TOOL_TYPE_MAP = {
     "computer": "computer_20250124",
     "bash": "bash_20250124",
-    "text_editor": "text_editor_20250124",
 }
 
 
