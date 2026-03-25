@@ -1,7 +1,7 @@
 .PHONY: all test build-cli install install-cli go-install lint clean help
 .PHONY: agent-py-lc-install agent-py-lc-run agent-py-lc-lint agent-ts-vercel-install agent-ts-vercel-run
 
-all: build-cli ## Default target
+all: install-cli ## Default target (build + install to ~/.local/bin)
 
 test: ## Run Go tests
 	go test ./...
@@ -18,8 +18,6 @@ install-cli: build-cli ## Install CLI to ~/.local/bin
 	mkdir -p ~/.local/bin
 	cp bin/dexbox ~/.local/bin/dexbox
 	@echo "Installed dexbox to ~/.local/bin"
-	@echo "IMPORTANT: Ensure ~/.local/bin is in your PATH. If not, add this to your shell profile:"
-	@echo 'export PATH="$$HOME/.local/bin:$$PATH"'
 
 go-install: ## Install CLI using 'go install' (standard Go way)
 	go install ./cmd/dexbox
