@@ -351,26 +351,9 @@ func ListVMs(ctx context.Context) ([]string, error) {
 }
 
 // AddSharedFolder adds a shared folder mapping to the VM.
-// If the VM is running, it adds both a persistent and a transient mapping
-// so the folder is available immediately and survives restarts.
 func AddSharedFolder(ctx context.Context, vmName, shareName, hostPath string) error {
-	state, _ := VMState(ctx, vmName)
-	if state == "running" {
-		// Transient mapping for the current session
-		if _, err := RunVBoxManage(ctx, "sharedfolder", "add", vmName,
-			"--name", shareName, "--hostpath", hostPath, "--automount", "--transient"); err != nil {
-			return fmt.Errorf("add transient shared folder: %w", err)
-		}
-	}
-	// Persistent mapping (requires VM to be stopped, but is a no-op conflict if
-	// the folder name already exists — VBoxManage returns an error we can ignore
-	// when we already added the transient one above).
 	_, err := RunVBoxManage(ctx, "sharedfolder", "add", vmName,
 		"--name", shareName, "--hostpath", hostPath, "--automount")
-	if err != nil && state == "running" {
-		// Persistent add fails while running — expected; transient is already active.
-		return nil
-	}
 	return err
 }
 
