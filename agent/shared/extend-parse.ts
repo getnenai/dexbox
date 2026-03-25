@@ -82,7 +82,8 @@ export async function parseDocument(
 
   const raw = (await parseRes.json()) as Record<string, unknown>;
 
-  const chunks = (raw.chunks ?? []) as Array<Record<string, unknown>>;
+  const output = (raw.output ?? {}) as Record<string, unknown>;
+  const chunks = ((output.chunks ?? []) as Array<Record<string, unknown>>);
   const markdown = chunks
     .filter((c) => typeof c.content === "string" && c.content)
     .map((c) => c.content as string)

@@ -89,7 +89,8 @@ def parse_document(
 
     raw = parse_res.json()
 
-    chunks = raw.get("chunks", [])
+    output = raw.get("output") or {}
+    chunks = output.get("chunks", []) if isinstance(output, dict) else []
     markdown = "\n\n".join(
         c.get("content", "") for c in chunks if isinstance(c, dict) and c.get("content")
     )
