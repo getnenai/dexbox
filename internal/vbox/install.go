@@ -76,7 +76,21 @@ func Install(ctx context.Context, vmName, isoOverride string) error {
 		return fmt.Errorf("unattended install: %w", err)
 	}
 
-	// Step 5: Start VM and wait for Guest Additions
+	// Step 5: Configure shared folder (must happen while VM is powered off
+	// so the mapping is permanent rather than transient)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+	sharedDir := filepath.Join(home, ".dexbox", "shared")
+	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		return fmt.Errorf("create shared dir: %w", err)
+	}
+	if err := AddSharedFolder(ctx, vmName, "shared", sharedDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not add shared folder: %v\n", err)
+	}
+
+	// Step 6: Start VM and wait for Guest Additions
 	fmt.Println("Starting VM...")
 	if err := StartVM(ctx, vmName, true); err != nil {
 		return fmt.Errorf("start VM: %w", err)
@@ -97,14 +111,6 @@ func Install(ctx context.Context, vmName, isoOverride string) error {
 	if err := waitForInstallation(ctx, vmName); err != nil {
 		return fmt.Errorf("waiting for installation: %w", err)
 	}
-
-	// Step 6: Configure shared folder
-	home, _ := os.UserHomeDir()
-	sharedDir := filepath.Join(home, ".dexbox", "shared")
-	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
-		return fmt.Errorf("create shared dir: %w", err)
-	}
-	_ = AddSharedFolder(ctx, vmName, "shared", sharedDir)
 
 	// Step 7: Done
 	fmt.Println("")

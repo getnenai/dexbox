@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -121,9 +122,10 @@ func GuestAdditionsReady(ctx context.Context, vmName string) bool {
 	if err != nil {
 		return false
 	}
-	// GuestAdditionsRunLevel=2 means fully running
+	// GuestAdditionsRunLevel >= 2 means fully running (level 3 = desktop integration)
 	level := parseMachineReadable(out, "GuestAdditionsRunLevel")
-	return level == "2"
+	n, err := strconv.Atoi(level)
+	return err == nil && n >= 2
 }
 
 // guestOSReady returns true if Guest Additions report a guest OS product name
