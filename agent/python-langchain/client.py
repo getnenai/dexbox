@@ -12,6 +12,7 @@ import httpx
 
 DEXBOX_URL = os.getenv("DEXBOX_URL", "http://localhost:8600")
 DEXBOX_MODEL = os.getenv("DEXBOX_MODEL", "claude-sonnet-4-20250514")
+DEXBOX_VM = os.getenv("DEXBOX_VM", "").strip()
 
 # Generous timeout — screenshots and PowerShell commands can be slow
 _TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
@@ -51,12 +52,17 @@ def call_dexbox(tool_call: dict) -> dict:
         httpx.HTTPStatusError: On non-2xx response.
         RuntimeError: If the response contains an error field.
     """
+    params = {"model": DEXBOX_MODEL}
+    if DEXBOX_VM:
+        params["vm"] = DEXBOX_VM
     r = httpx.post(
         f"{DEXBOX_URL}/actions",
-        params={"model": DEXBOX_MODEL},
+        params=params,
         json=tool_call,
         timeout=_TIMEOUT,
     )
+    if r.status_code >= 400:
+        print(f"  [dexbox] HTTP {r.status_code}", flush=True)
     r.raise_for_status()
 
     data = r.json()
@@ -70,9 +76,12 @@ def call_dexbox_raw(tool_call: dict) -> bytes:
 
     Uses Accept: image/png to get raw image bytes instead of JSON.
     """
+    params = {"model": DEXBOX_MODEL}
+    if DEXBOX_VM:
+        params["vm"] = DEXBOX_VM
     r = httpx.post(
         f"{DEXBOX_URL}/actions",
-        params={"model": DEXBOX_MODEL},
+        params=params,
         json=tool_call,
         headers={"Accept": "image/png"},
         timeout=_TIMEOUT,
