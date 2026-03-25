@@ -16,7 +16,7 @@ type CanonicalAction struct {
 
 // CanonicalResult is the internal representation of a tool call result.
 type CanonicalResult struct {
-	Output     string `json:"output,omitempty"`     // text output (bash, editor)
+	Output     string `json:"output,omitempty"`     // text output (bash)
 	Image      []byte `json:"-"`                    // screenshot PNG bytes
 	Coordinate [2]int `json:"coordinate,omitempty"` // cursor position
 }

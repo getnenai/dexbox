@@ -21,6 +21,12 @@ cd dexbox
 make
 ```
 
+> **Note:** `make` installs `dexbox` to `~/.local/bin`. Ensure this directory is on your `PATH`:
+>
+> ```bash
+> export PATH="$HOME/.local/bin:$PATH"  # add to ~/.zshrc or ~/.bashrc
+> ```
+
 Provision a Windows 11 VM (downloads ISO, creates VM, runs unattended install)
 
 The `--iso` is required for ARM hosts like Apple Silicon only.
@@ -104,7 +110,7 @@ Two reference agents are included. Both require a running dexbox instance (`dexb
 
 ### TypeScript (Vercel AI SDK)
 
-Supports Claude (default), Lux Actor, and Lux Thinker models.
+Supports Claude (default), Lux Actor (`lux-actor-1`), and Lux Thinker (`lux-thinker-1`) models.
 
 ```bash
 cd agent/typescript-vercel-ai
@@ -113,6 +119,7 @@ cp ../.env.example ../.env  # add your ANTHROPIC_API_KEY and/or OAGI_API_KEY
 
 npx tsx src/index.ts "Take a screenshot of the desktop"
 npx tsx src/index.ts --model lux-actor-1 "Open Edge and go to google.com"
+npx tsx src/index.ts --model lux-thinker-1 "Find and open the calculator app"
 ```
 
 ### Python (LangChain)
@@ -312,11 +319,13 @@ If `[name]` is omitted and exactly one VM exists, it is used automatically.
 
 ### RDP commands
 
-| Command                                                              | Description                 |
-| -------------------------------------------------------------------- | --------------------------- |
-| `dexbox rdp add <name> --host <h> --user <u> --pass <p>`            | Register an RDP connection  |
-| `dexbox rdp remove <name>`                                           | Unregister an RDP connection|
-| `dexbox rdp list`                                                    | List RDP connections        |
+| Command                                                              | Description                            |
+| -------------------------------------------------------------------- | -------------------------------------- |
+| `dexbox rdp add <name> --host <h> --user <u> --pass <p>`            | Register an RDP connection             |
+| `dexbox rdp remove <name>`                                           | Unregister an RDP connection           |
+| `dexbox rdp list`                                                    | List RDP connections                   |
+| `dexbox rdp connect <name>`                                          | Verify RDP target (alias for `up`)     |
+| `dexbox rdp disconnect <name>`                                       | Disconnect RDP (alias for `down`)      |
 
 ### Tool action commands
 
@@ -346,6 +355,7 @@ Built-in adapters: Anthropic (`claude-*`), OpenAI (`gpt-*`, `o1-*`, `o3-*`), Gem
 
 | Variable                   | Default                  | Description              |
 | -------------------------- | ------------------------ | ------------------------ |
+| `DEXBOX_VM_NAME`           | `dexbox-win11`           | Default VM name          |
 | `DEXBOX_VM_USER`           | `dexbox`                 | Guest OS username        |
 | `DEXBOX_VM_PASS`           | `dexbox123`              | Guest OS password        |
 | `DEXBOX_SOAP_ADDR`         | `http://localhost:18083` | vboxwebsrv endpoint      |
@@ -365,7 +375,7 @@ flowchart LR
 
     subgraph dexbox["dexbox"]
         Server["Tool Server\n:8600"]
-        Tools["Tools\nscreenshot · mouse · keyboard\nbash · file I/O"]
+        Tools["Tools\nscreenshot · mouse · keyboard · bash"]
         VBox["VirtualBox Layer\nVM lifecycle"]
     end
 
@@ -419,5 +429,3 @@ internal/
 ## License
 
 This project is licensed under the [Apache License 2.0](LICENSE).
-
-For information on the licenses of third-party dependencies used in this project, please see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

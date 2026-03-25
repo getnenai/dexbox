@@ -19,7 +19,6 @@ interface ToolSchema {
 const TOOL_TYPE_IDS: Record<string, string> = {
   computer: "computer_20250124",
   bash: "bash_20250124",
-  text_editor: "text_editor_20250124",
 };
 
 // Build the execute function for a tool. Forwards args to POST /actions.
