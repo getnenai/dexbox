@@ -81,12 +81,12 @@ export async function runClaude(prompt: string): Promise<string> {
           const out = tr.output ?? tr.result;
           const preview = out?.base64_image
             ? `<screenshot ${out.base64_image.length} chars>`
-            : JSON.stringify(out).slice(0, 200);
+            : JSON.stringify(out);
           console.log(`  [result] ${tr.toolName}: ${preview}`);
         }
       }
       if (text) {
-        console.log(`  [text] ${text.slice(0, 200)}`);
+        console.log(`  [text] ${text}`);
       }
     },
   });
