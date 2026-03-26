@@ -126,7 +126,8 @@ func (m *Manager) Stop(ctx context.Context, vmName string) error {
 // waitForPoweroff polls until the VM reaches the "poweroff" state or the
 // timeout expires.
 func (m *Manager) waitForPoweroff(ctx context.Context, vmName string, timeout time.Duration) error {
-	deadline := time.After(timeout)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -134,7 +135,7 @@ func (m *Manager) waitForPoweroff(ctx context.Context, vmName string, timeout ti
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-deadline:
+		case <-timer.C:
 			return fmt.Errorf("timeout waiting for VM %q to power off", vmName)
 		case <-ticker.C:
 			state, err := VMState(ctx, vmName)

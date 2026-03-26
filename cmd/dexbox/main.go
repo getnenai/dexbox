@@ -442,13 +442,13 @@ func listFromServer(typeFilter string) ([]desktop.DesktopStatus, error) {
 	if addr == "" || addr[0] == ':' {
 		addr = "localhost" + addr
 	}
-	url := fmt.Sprintf("http://%s/desktops", addr)
+	reqURL := fmt.Sprintf("http://%s/desktops", addr)
 	if typeFilter != "" {
-		url += "?type=" + typeFilter
+		reqURL += "?type=" + typeFilter
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := client.Get(reqURL)
 	if err != nil {
 		return nil, err
 	}
