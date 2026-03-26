@@ -80,16 +80,72 @@ func (m *Manager) Start(ctx context.Context, vmName string) error {
 	return m.ConnectSOAP(ctx, vmName)
 }
 
-// Stop performs a graceful ACPI shutdown and disconnects SOAP.
+// Stop performs a graceful shutdown and disconnects SOAP.
+//
+// It runs PowerShell Stop-Computer inside the guest via Guest Additions for a
+// reliable OS-initiated shutdown, then polls until the VM reaches poweroff
+// state. Guest Additions are required; if they are not available, Stop returns
+// an error (use Poweroff / --force for a hard power-off).
+//
+// Stop is idempotent: if the VM is already powered off or aborted it returns
+// nil immediately.
 func (m *Manager) Stop(ctx context.Context, vmName string) error {
 	if err := m.ensureVM(ctx, vmName); err != nil {
 		return err
 	}
+
+	// If the VM is already off, there is nothing to do.
+	state, err := VMState(ctx, vmName)
+	if err != nil {
+		return err
+	}
+	if state == "poweroff" || state == "aborted" {
+		return nil
+	}
+
 	if soap, ok := m.sessions[vmName]; ok {
 		_ = soap.Disconnect()
 		delete(m.sessions, vmName)
 	}
-	return ControlVM(ctx, vmName, "acpipowerbutton")
+
+	if !GuestAdditionsReady(ctx, vmName) {
+		return fmt.Errorf("VM %q does not have Guest Additions running; cannot shut down gracefully (use --force to poweroff)", vmName)
+	}
+
+	// Use PowerShell Stop-Computer (matches the bash tool's invocation
+	// pattern which is proven to work via guestcontrol). GuestRun will
+	// return an error because the shutdown kills the guestcontrol
+	// session — we ignore it and poll for poweroff state instead.
+	GuestRun(ctx, vmName, m.soapUser, m.soapPass,
+		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+		"-NoProfile", "-NonInteractive", "-Command", "Stop-Computer -Force")
+
+	return m.waitForPoweroff(ctx, vmName, 60*time.Second)
+}
+
+// waitForPoweroff polls until the VM reaches the "poweroff" state or the
+// timeout expires.
+func (m *Manager) waitForPoweroff(ctx context.Context, vmName string, timeout time.Duration) error {
+	deadline := time.After(timeout)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline:
+			return fmt.Errorf("timeout waiting for VM %q to power off", vmName)
+		case <-ticker.C:
+			state, err := VMState(ctx, vmName)
+			if err != nil {
+				continue
+			}
+			if state == "poweroff" || state == "aborted" {
+				return nil
+			}
+		}
+	}
 }
 
 // Poweroff immediately cuts power to the VM (data loss risk).

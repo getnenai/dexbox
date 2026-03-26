@@ -52,8 +52,14 @@ export async function runClaude(prompt: string): Promise<string> {
         required: ["file_path"],
       }),
       execute: async ({ file_path }: { file_path: string }) => {
-        const markdown = await parseDocument(file_path);
-        return { output: markdown };
+        try {
+          const markdown = await parseDocument(file_path);
+          return { output: markdown };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`  [parse_documentTool error] ${msg}`);
+          return { error: msg };
+        }
       },
     } as any);
     systemPrompt += PARSE_TOOL_ADDENDUM;
@@ -78,10 +84,18 @@ export async function runClaude(prompt: string): Promise<string> {
       if (toolResults?.length) {
         for (const tr of toolResults) {
           const out = tr.output ?? tr.result;
-          const preview = out?.base64_image
-            ? `<screenshot ${out.base64_image.length} chars>`
-            : JSON.stringify(out);
-          console.log(`  [result] ${tr.toolName}: ${preview}`);
+          if (out?.base64_image) {
+            console.log(`  [result] ${tr.toolName}: <screenshot ${out.base64_image.length} chars>`);
+          } else if (typeof out?.output === "string" && tr.toolName === "bashTool") {
+            // Pretty-print bash output as indented text for readability.
+            const lines = out.output.split("\n");
+            console.log(`  [result] ${tr.toolName}:`);
+            for (const line of lines) {
+              console.log(`    ${line}`);
+            }
+          } else {
+            console.log(`  [result] ${tr.toolName}: ${JSON.stringify(out)}`);
+          }
         }
       }
       if (text) {

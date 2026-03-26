@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -343,23 +344,22 @@ Examples:
 
 func cmdDown() *cobra.Command {
 	var (
-		shutdown bool
-		force    bool
-		all      bool
+		force bool
+		all   bool
 	)
 
 	c := &cobra.Command{
 		Use:   "down [name]",
-		Short: "Disconnect a desktop or shut down everything",
-		Long: `Disconnect a desktop session or shut down all desktops.
+		Short: "Shut down a desktop or all desktops",
+		Long: `Shut down a desktop (disconnect + graceful OS shutdown).
 
-Without --all, disconnects the named desktop (VM stays running).
-With --shutdown, also powers off the VM (RDP targets cannot be shut down).
-With --all, disconnects all sessions, shuts down all VMs, and stops guacd.
+For a single desktop, disconnects the session and shuts down the guest.
+With --force, performs a hard power off instead.
+With --all, shuts down all VMs, disconnects all sessions, and stops guacd.
 
 Examples:
-  dexbox down my-vm              # disconnect session, VM keeps running
-  dexbox down my-vm --shutdown   # disconnect + ACPI power off
+  dexbox down my-vm              # graceful shutdown
+  dexbox down my-vm --force      # hard power off
   dexbox down --all              # shut everything down
   dexbox down --all --force      # hard poweroff all VMs`,
 		Args: cobra.MaximumNArgs(1),
@@ -386,21 +386,20 @@ Examples:
 			}
 
 			name := args[0]
-			if err := mgr.Down(ctx, name, shutdown, force); err != nil {
+			if err := mgr.Down(ctx, name, true, force); err != nil {
 				return err
 			}
-			if shutdown {
-				fmt.Printf("Desktop %q shut down\n", name)
+			if force {
+				fmt.Printf("Desktop %q powered off\n", name)
 			} else {
-				fmt.Printf("Desktop %q disconnected\n", name)
+				fmt.Printf("Desktop %q shut down\n", name)
 			}
 			return nil
 		},
 	}
 
-	c.Flags().BoolVar(&shutdown, "shutdown", false, "Also power off the VM (VM only)")
-	c.Flags().BoolVar(&force, "force", false, "Hard poweroff instead of ACPI (requires --shutdown or --all)")
-	c.Flags().BoolVar(&all, "all", false, "Disconnect all sessions and shut down all VMs")
+	c.Flags().BoolVar(&force, "force", false, "Hard poweroff instead of graceful ACPI shutdown")
+	c.Flags().BoolVar(&all, "all", false, "Shut down all desktops and stop guacd")
 
 	return c
 }
@@ -412,6 +411,13 @@ func cmdList() *cobra.Command {
 		Use:   "list",
 		Short: "List all desktops (VMs and RDP connections)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Try the running server first for accurate connected state.
+			if desktops, err := listFromServer(typeFilter); err == nil {
+				printDesktopList(desktops)
+				return nil
+			}
+
+			// Server unreachable — fall back to local VBoxManage + connection store.
 			mgr, err := newDesktopManager()
 			if err != nil {
 				return err
@@ -421,25 +427,59 @@ func cmdList() *cobra.Command {
 				return err
 			}
 
-			if len(desktops) == 0 {
-				fmt.Println("No desktops found.")
-				return nil
-			}
-
-			fmt.Printf("%-20s %-6s %-14s %s\n", "NAME", "TYPE", "STATE", "CONNECTED")
-			for _, d := range desktops {
-				connStr := "no"
-				if d.Connected {
-					connStr = "yes"
-				}
-				fmt.Printf("%-20s %-6s %-14s %s\n", d.Name, d.Type, d.State, connStr)
-			}
+			printDesktopList(desktops)
 			return nil
 		},
 	}
 
 	c.Flags().StringVar(&typeFilter, "type", "", "Filter by type: vm or rdp")
 	return c
+}
+
+// listFromServer queries the running dexbox server's /desktops endpoint.
+func listFromServer(typeFilter string) ([]desktop.DesktopStatus, error) {
+	addr := config.Listen
+	if addr == "" || addr[0] == ':' {
+		addr = "localhost" + addr
+	}
+	url := fmt.Sprintf("http://%s/desktops", addr)
+	if typeFilter != "" {
+		url += "?type=" + typeFilter
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Desktops []desktop.DesktopStatus `json:"desktops"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	return body.Desktops, nil
+}
+
+func printDesktopList(desktops []desktop.DesktopStatus) {
+	if len(desktops) == 0 {
+		fmt.Println("No desktops found.")
+		return
+	}
+	fmt.Printf("%-20s %-6s %-14s %s\n", "NAME", "TYPE", "STATE", "CONNECTED")
+	for _, d := range desktops {
+		connStr := "no"
+		if d.Connected {
+			connStr = "yes"
+		}
+		fmt.Printf("%-20s %-6s %-14s %s\n", d.Name, d.Type, d.State, connStr)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +607,7 @@ dexbox auto-detects the VM. Auto-detection fails when multiple VMs exist.`,
 		vmAction("start", "Start a VM", func(ctx context.Context, mgr *vbox.Manager, name string) error {
 			return mgr.Start(ctx, name)
 		}),
-		vmAction("stop", "Graceful ACPI shutdown", func(ctx context.Context, mgr *vbox.Manager, name string) error {
+		vmAction("stop", "Graceful shutdown", func(ctx context.Context, mgr *vbox.Manager, name string) error {
 			return mgr.Stop(ctx, name)
 		}),
 		vmAction("poweroff", "Immediately cut power (force stop)", func(ctx context.Context, mgr *vbox.Manager, name string) error {

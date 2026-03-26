@@ -1,4 +1,4 @@
-import { readFileSync, mkdirSync, writeFileSync } from "fs";
+import { readFileSync, readdirSync, mkdirSync, writeFileSync } from "fs";
 import { resolve, basename, dirname, join } from "path";
 import { homedir } from "os";
 
@@ -40,7 +40,17 @@ export async function parseDocument(
   try {
     fileBytes = readFileSync(absPath);
   } catch {
-    throw new Error(`File not found: ${absPath}`);
+    // List available files so callers know what's actually in the directory
+    let listing = "";
+    try {
+      const files = readdirSync(sharedDir).filter(f => !f.includes(":") && f !== "parsed");
+      if (files.length > 0) {
+        listing = ` Available files: ${files.join(", ")}`;
+      } else {
+        listing = " The shared directory is empty.";
+      }
+    } catch { /* ignore listing errors */ }
+    throw new Error(`File not found: ${absPath}.${listing}`);
   }
 
   const headers = {
