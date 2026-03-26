@@ -50,7 +50,7 @@ func (t *BashTool) Execute(ctx context.Context, command string, timeout time.Dur
 // sanitizeOutput cleans raw VBoxManage guest output for readability:
 //   - normalizes \r\n → \n and strips stray \r
 //   - trims trailing whitespace from each line
-//   - collapses runs of 3+ blank lines into a single blank line
+//   - collapses runs of 2+ blank lines into a single blank line
 //   - trims leading/trailing blank lines
 //   - truncates to maxOutputLen with a marker
 func sanitizeOutput(raw string) string {
