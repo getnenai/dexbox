@@ -351,14 +351,14 @@ func cmdDown() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "down [name]",
 		Short: "Shut down a desktop or all desktops",
-		Long: `Shut down a desktop (disconnect + graceful ACPI power off).
+		Long: `Shut down a desktop (disconnect + graceful OS shutdown).
 
-For a single desktop, disconnects the session and sends an ACPI shutdown.
+For a single desktop, disconnects the session and shuts down the guest.
 With --force, performs a hard power off instead.
 With --all, shuts down all VMs, disconnects all sessions, and stops guacd.
 
 Examples:
-  dexbox down my-vm              # graceful ACPI shutdown
+  dexbox down my-vm              # graceful shutdown
   dexbox down my-vm --force      # hard power off
   dexbox down --all              # shut everything down
   dexbox down --all --force      # hard poweroff all VMs`,
@@ -607,7 +607,7 @@ dexbox auto-detects the VM. Auto-detection fails when multiple VMs exist.`,
 		vmAction("start", "Start a VM", func(ctx context.Context, mgr *vbox.Manager, name string) error {
 			return mgr.Start(ctx, name)
 		}),
-		vmAction("stop", "Graceful ACPI shutdown", func(ctx context.Context, mgr *vbox.Manager, name string) error {
+		vmAction("stop", "Graceful shutdown", func(ctx context.Context, mgr *vbox.Manager, name string) error {
 			return mgr.Stop(ctx, name)
 		}),
 		vmAction("poweroff", "Immediately cut power (force stop)", func(ctx context.Context, mgr *vbox.Manager, name string) error {

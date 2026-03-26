@@ -581,7 +581,11 @@ func (s *Server) executeAction(r *http.Request, vmName string, action *tools.Can
 		bt := s.getBashTool(vmName)
 		out, err := bt.Execute(r.Context(), p.Command, 2*time.Minute)
 		if err != nil {
-			return nil, err
+			// Return the error as output (like a real shell) instead of
+			// propagating it as an HTTP 500. This lets the agent see the
+			// error message and decide how to recover.
+			log.Printf("[bash] command failed: %v", err)
+			return &tools.CanonicalResult{Output: fmt.Sprintf("error: %v", err)}, nil
 		}
 		return &tools.CanonicalResult{Output: out}, nil
 

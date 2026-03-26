@@ -95,22 +95,19 @@ func (m *Manager) Stop(ctx context.Context, vmName string) error {
 		delete(m.sessions, vmName)
 	}
 
-	// Prefer guest-initiated shutdown when Guest Additions are available.
-	if GuestAdditionsReady(ctx, vmName) {
-		// Use PowerShell Stop-Computer (matches the bash tool's invocation
-		// pattern which is proven to work via guestcontrol). GuestRun will
-		// return an error because the shutdown kills the guestcontrol
-		// session — we ignore it and poll for poweroff state instead.
-		GuestRun(ctx, vmName, m.soapUser, m.soapPass,
-			`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
-			"-NoProfile", "-NonInteractive", "-Command", "Stop-Computer -Force")
-		if err := m.waitForPoweroff(ctx, vmName, 60*time.Second); err == nil {
-			return nil
-		}
-		// Timed out waiting — fall through to ACPI as last resort.
+	if !GuestAdditionsReady(ctx, vmName) {
+		return fmt.Errorf("VM %q does not have Guest Additions running; cannot shut down gracefully (use --force to poweroff)", vmName)
 	}
 
-	return ControlVM(ctx, vmName, "acpipowerbutton")
+	// Use PowerShell Stop-Computer (matches the bash tool's invocation
+	// pattern which is proven to work via guestcontrol). GuestRun will
+	// return an error because the shutdown kills the guestcontrol
+	// session — we ignore it and poll for poweroff state instead.
+	GuestRun(ctx, vmName, m.soapUser, m.soapPass,
+		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+		"-NoProfile", "-NonInteractive", "-Command", "Stop-Computer -Force")
+
+	return m.waitForPoweroff(ctx, vmName, 60*time.Second)
 }
 
 // waitForPoweroff polls until the VM reaches the "poweroff" state or the
