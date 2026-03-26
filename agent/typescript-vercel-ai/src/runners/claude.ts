@@ -22,7 +22,7 @@ Guidelines:
 - Always start by taking a screenshot to see the current state of the desktop.
 - After every significant action (click, type, command), take a screenshot to verify the result.
 - Prefer PowerShell (bashTool) for tasks that can be done programmatically, it is faster and more reliable than GUI interaction.
-- Use Windows file paths (e.g. C:\\\\Users\\\\dexbox\\\\Desktop\\\\file.txt).
+- Use Windows file paths (e.g. C:\\Users\\dexbox\\Desktop\\file.txt).
 - For GUI interaction, identify UI elements from screenshots and click their coordinates precisely.
 - If an action does not produce the expected result, try an alternative approach.
 - When the task is complete, summarize what was accomplished.`;

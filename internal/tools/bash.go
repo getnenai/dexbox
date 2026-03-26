@@ -78,12 +78,13 @@ func sanitizeOutput(raw string) string {
 	result := strings.TrimSpace(strings.Join(cleaned, "\n"))
 
 	// Truncate if too long.
-	if len(result) > maxOutputLen {
+	runes := []rune(result)
+	if len(runes) > maxOutputLen {
 		half := maxOutputLen / 2
-		truncated := len(result) - maxOutputLen
-		result = result[:half] +
+		truncated := len(runes) - maxOutputLen
+		result = string(runes[:half]) +
 			fmt.Sprintf("\n\n... (%d characters truncated) ...\n\n", truncated) +
-			result[len(result)-half:]
+			string(runes[len(runes)-half:])
 	}
 
 	return result

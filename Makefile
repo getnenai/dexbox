@@ -10,7 +10,7 @@ test: ## Run Go tests
 build-cli: ## Build the Go CLI binary
 	mkdir -p bin
 	go build -o bin/dexbox ./cmd/dexbox
-	codesign -f -s - bin/dexbox
+	@if [ "$$(uname)" = "Darwin" ]; then codesign -f -s - bin/dexbox; fi
 
 install: build-cli ## Install CLI to /usr/local/bin (requires sudo)
 	sudo cp bin/dexbox /usr/local/bin/dexbox
@@ -19,7 +19,7 @@ install: build-cli ## Install CLI to /usr/local/bin (requires sudo)
 install-cli: build-cli ## Install CLI to ~/.local/bin
 	mkdir -p ~/.local/bin
 	cp bin/dexbox ~/.local/bin/dexbox
-	codesign -f -s - ~/.local/bin/dexbox
+	@if [ "$$(uname)" = "Darwin" ]; then codesign -f -s - ~/.local/bin/dexbox; fi
 	@echo "Installed dexbox to ~/.local/bin"
 
 go-install: ## Install CLI using 'go install' (standard Go way)
