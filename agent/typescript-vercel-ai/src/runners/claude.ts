@@ -86,7 +86,7 @@ export async function runClaude(prompt: string): Promise<string> {
           const out = tr.output ?? tr.result;
           if (out?.base64_image) {
             console.log(`  [result] ${tr.toolName}: <screenshot ${out.base64_image.length} chars>`);
-          } else if (out?.output && typeof out.output === "string" && tr.toolName === "bashTool") {
+          } else if (typeof out?.output === "string" && tr.toolName === "bashTool") {
             // Pretty-print bash output as indented text for readability.
             const lines = out.output.split("\n");
             console.log(`  [result] ${tr.toolName}:`);

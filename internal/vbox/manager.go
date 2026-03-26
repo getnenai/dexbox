@@ -82,14 +82,27 @@ func (m *Manager) Start(ctx context.Context, vmName string) error {
 
 // Stop performs a graceful shutdown and disconnects SOAP.
 //
-// If Guest Additions are available, it runs PowerShell Stop-Computer inside
-// the guest for a reliable OS-initiated shutdown, then polls until the VM
-// reaches poweroff state. Otherwise it falls back to the ACPI power button
-// signal, which some Windows configurations ignore.
+// It runs PowerShell Stop-Computer inside the guest via Guest Additions for a
+// reliable OS-initiated shutdown, then polls until the VM reaches poweroff
+// state. Guest Additions are required; if they are not available, Stop returns
+// an error (use Poweroff / --force for a hard power-off).
+//
+// Stop is idempotent: if the VM is already powered off or aborted it returns
+// nil immediately.
 func (m *Manager) Stop(ctx context.Context, vmName string) error {
 	if err := m.ensureVM(ctx, vmName); err != nil {
 		return err
 	}
+
+	// If the VM is already off, there is nothing to do.
+	state, err := VMState(ctx, vmName)
+	if err != nil {
+		return err
+	}
+	if state == "poweroff" || state == "aborted" {
+		return nil
+	}
+
 	if soap, ok := m.sessions[vmName]; ok {
 		_ = soap.Disconnect()
 		delete(m.sessions, vmName)
