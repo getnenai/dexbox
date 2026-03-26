@@ -14,16 +14,15 @@ const PARSE_TOOL_DESCRIPTION =
 
 const BASE_SYSTEM_PROMPT = `You are a computer-use agent controlling a Windows 11 virtual machine.
 
-You have three tools:
+You have two tools:
 - computerTool: Take screenshots, click, type, scroll, and drag on the VM screen.
 - bashTool: Run PowerShell commands on the guest (not Linux bash, use PowerShell syntax).
-- text_editorTool: View and edit files on the guest using Windows paths.
 
 Guidelines:
 - Always start by taking a screenshot to see the current state of the desktop.
 - After every significant action (click, type, command), take a screenshot to verify the result.
 - Prefer PowerShell (bashTool) for tasks that can be done programmatically, it is faster and more reliable than GUI interaction.
-- Use Windows file paths (e.g. C:\\Users\\dexbox\\Desktop\\file.txt).
+- Use Windows file paths (e.g. C:\\\\Users\\\\dexbox\\\\Desktop\\\\file.txt).
 - For GUI interaction, identify UI elements from screenshots and click their coordinates precisely.
 - If an action does not produce the expected result, try an alternative approach.
 - When the task is complete, summarize what was accomplished.`;
@@ -53,8 +52,14 @@ export async function runClaude(prompt: string): Promise<string> {
         required: ["file_path"],
       }),
       execute: async ({ file_path }: { file_path: string }) => {
-        const markdown = await parseDocument(file_path);
-        return { output: markdown };
+        try {
+          const markdown = await parseDocument(file_path);
+          return { output: markdown };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`  [parse_documentTool error] ${msg}`);
+          return { error: msg };
+        }
       },
     } as any);
     systemPrompt += PARSE_TOOL_ADDENDUM;
