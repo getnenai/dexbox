@@ -4,6 +4,10 @@
 
 A Windows desktop developer tool for creating computer-use AI agents. Dexbox manages Windows desktops — either VirtualBox VMs or external RDP targets — and exposes an HTTP API that any AI agent (Claude, GPT, Gemini) can call directly. No agent loop, no SDK, just pipe tool calls through.
 
+## Demo
+
+https://github.com/user-attachments/assets/50d50af4-829d-4cb1-a0c0-60bb4d4401a4
+
 ## Requirements
 
 - [Go 1.24+](https://go.dev/doc/install)
