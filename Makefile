@@ -1,4 +1,4 @@
-.PHONY: all test build-cli install install-cli go-install lint clean help
+.PHONY: all test build-cli build-agent install install-cli go-install lint clean help
 .PHONY: agent-py-lc-install agent-py-lc-run agent-py-lc-lint agent-ts-vercel-install agent-ts-vercel-run
 .PHONY: extend-parse-ts extend-parse-py
 
@@ -11,6 +11,10 @@ build-cli: ## Build the Go CLI binary
 	mkdir -p bin
 	go build -o bin/dexbox ./cmd/dexbox
 	@if [ "$$(uname)" = "Darwin" ]; then codesign -f -s - bin/dexbox; fi
+
+build-agent: ## Cross-compile dexbox-agent for Windows (amd64)
+	mkdir -p bin
+	GOOS=windows GOARCH=amd64 go build -o bin/dexbox-agent.exe ./cmd/dexbox-agent
 
 install: build-cli ## Install CLI to /usr/local/bin (requires sudo)
 	sudo cp bin/dexbox /usr/local/bin/dexbox
