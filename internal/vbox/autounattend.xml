@@ -139,6 +139,39 @@
                 <RefreshRate>60</RefreshRate>
             </Display>
 
+            <FirstLogonCommands>
+                <!-- Ensure dexbox user is in Administrators (belt-and-suspenders) -->
+                <SynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <CommandLine>cmd /c net localgroup Administrators dexbox /add</CommandLine>
+                    <Description>Add dexbox to Administrators</Description>
+                </SynchronousCommand>
+                <!-- Disable Windows Defender real-time monitoring -->
+                <SynchronousCommand wcm:action="add">
+                    <Order>2</Order>
+                    <CommandLine>powershell -Command "Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue"</CommandLine>
+                    <Description>Disable Defender real-time protection</Description>
+                </SynchronousCommand>
+                <!-- Add Defender exclusions for agent paths -->
+                <SynchronousCommand wcm:action="add">
+                    <Order>3</Order>
+                    <CommandLine>powershell -Command "Add-MpPreference -ExclusionPath '\\vboxsvr\shared','C:\dexbox','C:\Users\dexbox' -ErrorAction SilentlyContinue"</CommandLine>
+                    <Description>Add Defender exclusions for shared folder and agent paths</Description>
+                </SynchronousCommand>
+                <!-- Open firewall for dexbox-agent -->
+                <SynchronousCommand wcm:action="add">
+                    <Order>4</Order>
+                    <CommandLine>netsh advfirewall firewall add rule name="dexbox-agent" dir=in action=allow protocol=TCP localport=8600</CommandLine>
+                    <Description>Allow inbound TCP 8600 for dexbox-agent</Description>
+                </SynchronousCommand>
+                <!-- Set PowerShell execution policy to Bypass -->
+                <SynchronousCommand wcm:action="add">
+                    <Order>5</Order>
+                    <CommandLine>powershell -Command "Set-ExecutionPolicy Bypass -Scope LocalMachine -Force"</CommandLine>
+                    <Description>Allow PowerShell scripts to run</Description>
+                </SynchronousCommand>
+            </FirstLogonCommands>
+
         </component>
         <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
             <InputLocale>en-US</InputLocale>
