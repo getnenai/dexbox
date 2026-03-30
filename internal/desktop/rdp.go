@@ -13,6 +13,18 @@ import (
 	"github.com/deluan/bring"
 )
 
+// bringClient is the subset of *bring.Client used by RDP, extracted so
+// tests can substitute a lightweight mock without a real guacd connection.
+type bringClient interface {
+	Start()
+	Stop()
+	State() bring.SessionState
+	Screen() (image.Image, int64)
+	SendMouse(p image.Point, pressedButtons ...bring.MouseButton) error
+	SendText(sequence string) error
+	SendKey(key bring.KeyCode, pressed bool) error
+}
+
 // RDP implements Desktop using deluan/bring to talk to a guacd daemon
 // which proxies the actual RDP connection.
 type RDP struct {
@@ -20,7 +32,7 @@ type RDP struct {
 	config    RDPConfig
 	guacdAddr string
 
-	client *bring.Client
+	client bringClient
 	state  bring.SessionState
 	mu     sync.Mutex
 	done   chan struct{} // closed when client.Start() returns
@@ -283,7 +295,7 @@ func (r *RDP) KeyPress(ctx context.Context, spec string) error {
 func (r *RDP) Name() string { return r.name }
 func (r *RDP) Type() string { return "rdp" }
 
-func (r *RDP) getClient() *bring.Client {
+func (r *RDP) getClient() bringClient {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.client

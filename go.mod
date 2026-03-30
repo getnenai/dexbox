@@ -9,7 +9,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/spf13/cobra v1.10.2
 	github.com/wwt/guac v1.3.3
-	golang.org/x/image v0.23.0
+	golang.org/x/image v0.24.0
 )
 
 require (
@@ -34,3 +34,5 @@ require (
 )
 
 replace github.com/wwt/guac => github.com/getnenai/guac v1.3.3
+
+replace github.com/deluan/bring => /tmp/bring
