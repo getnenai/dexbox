@@ -452,10 +452,18 @@ func TestHandleDesktops_CreateRDP_MissingHost(t *testing.T) {
 // status of a single desktop.
 func TestHandleDesktopNamed_GetStatus(t *testing.T) {
 	srv := newTestServer(t)
-	vm := &mockDesktop{name: "test-vm", typ: "vm", isConnected: true}
-	injectSession(t, srv, vm)
 
-	req := httptest.NewRequest("GET", "/desktops/test-vm", nil)
+	// Seed an RDP connection so the desktop is always listable
+	// (no VBox needed).
+	store := srv.DesktopManager().Store()
+	store.Add("status-rdp", desktop.RDPConfig{
+		Host:     "10.0.0.1",
+		Port:     3389,
+		Username: "test",
+		Password: "test",
+	})
+
+	req := httptest.NewRequest("GET", "/desktops/status-rdp", nil)
 	w := httptest.NewRecorder()
 
 	srv.handleDesktopNamed(w, req)
@@ -463,13 +471,18 @@ func TestHandleDesktopNamed_GetStatus(t *testing.T) {
 	resp := w.Result()
 	defer resp.Body.Close()
 
-	// With nil vbox.Manager and no real VMs, the desktop won't appear in
-	// the List() output (VBoxManage not available). The handler should
-	// return 404 in the test environment.
-	// This test verifies the routing is correct (GET dispatches to
-	// getDesktopStatus rather than 404 from the default case).
-	if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 or 404, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, respBody)
+	}
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["name"] != "status-rdp" {
+		t.Errorf("expected name 'status-rdp', got %v", result["name"])
+	}
+	if result["type"] != "rdp" {
+		t.Errorf("expected type 'rdp', got %v", result["type"])
 	}
 }
 
@@ -520,8 +533,8 @@ func TestHandleDesktopNamed_Delete(t *testing.T) {
 func TestHandleDesktopNamed_ActionQueryParam(t *testing.T) {
 	srv := newTestServer(t)
 
-	// Without a real VBox manager, we expect an error — but the important
-	// thing is that the request routes correctly (not 404).
+	// Without a real VBox manager, pause will fail — but the important
+	// thing is that it routes correctly (500 from nil manager, not 404).
 	req := httptest.NewRequest("POST", "/desktops/some-vm?action=pause", nil)
 	w := httptest.NewRecorder()
 
@@ -530,10 +543,13 @@ func TestHandleDesktopNamed_ActionQueryParam(t *testing.T) {
 	resp := w.Result()
 	defer resp.Body.Close()
 
-	// Should get 500 (vbox.Manager is nil → panic avoided, error returned)
-	// rather than 404 (which would mean action= wasn't parsed).
+	// 503 means the handler dispatched correctly but no VBox manager is configured.
+	// 404 would mean the action= query param wasn't parsed.
 	if resp.StatusCode == http.StatusNotFound {
 		t.Fatal("?action=pause returned 404 — query param dispatch not working")
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (nil vbox manager), got %d", resp.StatusCode)
 	}
 }
 

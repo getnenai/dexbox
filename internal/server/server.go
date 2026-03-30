@@ -644,6 +644,9 @@ func (s *Server) createRDP(w http.ResponseWriter, ctx context.Context, name stri
 		return
 	}
 	if err := store.Save(); err != nil {
+		// Rollback: remove the entry we just added to keep memory
+		// consistent with the on-disk state.
+		_ = store.Remove(name)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error":   "tool_error",
 			"message": err.Error(),
@@ -742,6 +745,9 @@ func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
 
 	// VM power commands (path-segment or ?action=)
 	case r.Method == http.MethodPost && action == "start":
+		if !s.requireVBox(w) {
+			return
+		}
 		if err := s.manager.Start(ctx, name); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"error":   "tool_error",
@@ -752,16 +758,20 @@ func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "running"})
 
 	case r.Method == http.MethodPost && action == "stop":
-		if err := s.manager.Stop(ctx, name); err != nil {
+		if err := s.desktops.Down(ctx, name, true, false); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"error":   "tool_error",
 				"message": err.Error(),
 			})
 			return
 		}
+		s.clearToolCache(name)
 		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "poweroff"})
 
 	case r.Method == http.MethodPost && action == "pause":
+		if !s.requireVBox(w) {
+			return
+		}
 		if err := s.manager.Pause(ctx, name); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"error":   "tool_error",
@@ -772,6 +782,9 @@ func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "paused"})
 
 	case r.Method == http.MethodPost && action == "suspend":
+		if !s.requireVBox(w) {
+			return
+		}
 		if err := s.manager.Suspend(ctx, name); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"error":   "tool_error",
@@ -779,9 +792,15 @@ func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		// Clear session and cached tools since the VM is no longer running.
+		_ = s.desktops.Down(ctx, name, false, false)
+		s.clearToolCache(name)
 		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "saved"})
 
 	case r.Method == http.MethodPost && action == "resume":
+		if !s.requireVBox(w) {
+			return
+		}
 		if err := s.manager.Resume(ctx, name); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"error":   "tool_error",
@@ -824,14 +843,13 @@ func (s *Server) deleteDesktop(w http.ResponseWriter, ctx context.Context, name 
 	_ = s.desktops.Down(ctx, name, false, false)
 
 	// Clean up cached tools for this desktop.
-	s.toolsMu.Lock()
-	delete(s.computers, name)
-	delete(s.computerDskt, name)
-	delete(s.bashes, name)
-	s.toolsMu.Unlock()
+	s.clearToolCache(name)
 
 	// Try as VM first.
 	if vbox.VMExists(ctx, name) {
+		if !s.requireVBox(w) {
+			return
+		}
 		if err := s.manager.Delete(ctx, name); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"error":   "tool_error",
@@ -845,6 +863,8 @@ func (s *Server) deleteDesktop(w http.ResponseWriter, ctx context.Context, name 
 
 	// Try as RDP connection.
 	store := s.desktops.Store()
+	// Capture the config before removing so we can rollback on Save failure.
+	oldCfg, existed := store.Get(name)
 	if err := store.Remove(name); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{
 			"error":   "not_found",
@@ -853,6 +873,10 @@ func (s *Server) deleteDesktop(w http.ResponseWriter, ctx context.Context, name 
 		return
 	}
 	if err := store.Save(); err != nil {
+		// Rollback: re-insert the removed entry.
+		if existed {
+			_ = store.Add(name, oldCfg)
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error":   "tool_error",
 			"message": err.Error(),
@@ -860,6 +884,28 @@ func (s *Server) deleteDesktop(w http.ResponseWriter, ctx context.Context, name 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"name": name, "type": "rdp", "state": "deleted"})
+}
+
+// requireVBox writes a 503 response and returns false when the VBox manager
+// is not configured. Callers should return immediately when it returns false.
+func (s *Server) requireVBox(w http.ResponseWriter) bool {
+	if s.manager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error":   "no_vbox_manager",
+			"message": "VM control is not available",
+		})
+		return false
+	}
+	return true
+}
+
+// clearToolCache removes cached ComputerTool and BashTool instances for a desktop.
+func (s *Server) clearToolCache(name string) {
+	s.toolsMu.Lock()
+	delete(s.computers, name)
+	delete(s.computerDskt, name)
+	delete(s.bashes, name)
+	s.toolsMu.Unlock()
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

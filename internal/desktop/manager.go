@@ -244,7 +244,7 @@ func (m *Manager) List(ctx context.Context, typeFilter string) ([]DesktopStatus,
 	m.mu.Unlock()
 
 	// VMs
-	if typeFilter == "" || typeFilter == "vm" {
+	if (typeFilter == "" || typeFilter == "vm") && m.vbox != nil {
 		vms, err := m.vbox.List(ctx)
 		if err == nil {
 			for _, vm := range vms {
