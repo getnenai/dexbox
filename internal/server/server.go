@@ -98,17 +98,13 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/actions", s.handleAction)
 	mux.HandleFunc("/actions/batch", s.handleBatchAction)
 
-	// VM lifecycle routes (kept for backward compat)
-	mux.HandleFunc("/vm", s.handleVM)
-	mux.HandleFunc("/vm/", s.handleVMNamed)
-
-	// Unified desktop routes
+	// Desktop routes
 	mux.HandleFunc("/desktops", s.handleDesktops)
 
-	// Browser UI (view/tunnel) and desktop API share the /desktops/ prefix
-	store := desktop.NewConnectionStore(desktop.DefaultStorePath())
-	_ = store.Load()
-	webHandler := web.Handler(store, s.manager, "localhost:4822")
+	// Browser UI (view/tunnel) and desktop API share the /desktops/ prefix.
+	// Reuse the store from the desktop manager so API-created connections
+	// are immediately visible in the browser UI.
+	webHandler := web.Handler(s.desktops.Store(), s.manager, "localhost:4822")
 
 	mux.HandleFunc("/desktops/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/desktops/")
@@ -331,174 +327,7 @@ func (s *Server) handleBatchAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, results)
 }
 
-// --- VM lifecycle routes ---
 
-func (s *Server) handleVM(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	switch r.Method {
-	case http.MethodGet:
-		// List VMs
-		vms, err := s.manager.List(ctx)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-		if vms == nil {
-			vms = []vbox.VMStatus{}
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"vms": vms})
-
-	case http.MethodPost:
-		// Create VM
-		var req struct {
-			Name string `json:"name,omitempty"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-
-		name := req.Name
-		if name == "" {
-			name = fmt.Sprintf("dexbox-%s", randomSuffix())
-		}
-
-		if vbox.VMExists(ctx, name) {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":   "vm_exists",
-				"message": fmt.Sprintf("VM %q already exists. Use a different name or DELETE /vm/%s first.", name, name),
-			})
-			return
-		}
-
-		if err := s.manager.Create(ctx, name, vbox.DefaultVMConfig()); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		if err := s.manager.Start(ctx, name); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-
-		writeJSON(w, http.StatusCreated, map[string]any{
-			"name":  name,
-			"state": "running",
-		})
-
-	default:
-		w.WriteHeader(http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *Server) handleVMNamed(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	// Parse /vm/{name}[/action]
-	path := strings.TrimPrefix(r.URL.Path, "/vm/")
-	parts := strings.SplitN(path, "/", 2)
-	name := parts[0]
-	action := ""
-	if len(parts) > 1 {
-		action = parts[1]
-	}
-
-	if name == "" {
-		http.NotFound(w, r)
-		return
-	}
-
-	if !vbox.VMExists(ctx, name) {
-		writeJSON(w, http.StatusNotFound, map[string]any{
-			"error":   "vm_not_found",
-			"message": fmt.Sprintf("VM %q does not exist", name),
-		})
-		return
-	}
-
-	switch {
-	case r.Method == http.MethodDelete && action == "":
-		if err := s.manager.Delete(ctx, name); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "deleted"})
-
-	case r.Method == http.MethodGet && action == "status":
-		status, err := s.manager.Status(ctx, name)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, status)
-
-	case r.Method == http.MethodPost && action == "start":
-		if err := s.manager.Start(ctx, name); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "running"})
-
-	case r.Method == http.MethodPost && action == "stop":
-		if err := s.manager.Stop(ctx, name); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "poweroff"})
-
-	case r.Method == http.MethodPost && action == "pause":
-		if err := s.manager.Pause(ctx, name); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "paused"})
-
-	case r.Method == http.MethodPost && action == "suspend":
-		if err := s.manager.Suspend(ctx, name); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "saved"})
-
-	case r.Method == http.MethodPost && action == "resume":
-		if err := s.manager.Resume(ctx, name); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "running"})
-
-	default:
-		http.NotFound(w, r)
-	}
-}
 
 // --- Internal helpers ---
 
@@ -721,24 +550,116 @@ func (s *Server) getBashTool(vmName string) *tools.BashTool {
 
 
 
-// --- Unified desktop routes ---
+// --- Desktop routes ---
 
 func (s *Server) handleDesktops(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	ctx := r.Context()
+
+	switch r.Method {
+	case http.MethodGet:
+		typeFilter := r.URL.Query().Get("type")
+		desktops, err := s.desktops.List(ctx, typeFilter)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"desktops": desktops})
+
+	case http.MethodPost:
+		var req struct {
+			Type     string `json:"type"` // "vm" or "rdp"
+			Name     string `json:"name,omitempty"`
+			Host     string `json:"host,omitempty"`
+			Port     int    `json:"port,omitempty"`
+			Username string `json:"username,omitempty"`
+			Password string `json:"password,omitempty"`
+			Width    int    `json:"width,omitempty"`
+			Height   int    `json:"height,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":   "bad_request",
+				"message": "invalid JSON body",
+			})
+			return
+		}
+
+		switch req.Type {
+		case "rdp", "":
+			s.createRDP(w, ctx, req.Name, desktop.RDPConfig{
+				Host:     req.Host,
+				Port:     req.Port,
+				Username: req.Username,
+				Password: req.Password,
+				Width:    req.Width,
+				Height:   req.Height,
+			})
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":   "bad_request",
+				"message": fmt.Sprintf("unknown desktop type %q (use: rdp)", req.Type),
+			})
+		}
+
+	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+// createRDP handles POST /desktops with type=rdp.
+func (s *Server) createRDP(w http.ResponseWriter, ctx context.Context, name string, cfg desktop.RDPConfig) {
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": "name is required for RDP connections",
+		})
+		return
+	}
+	if cfg.Host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": "host is required for RDP connections",
+		})
 		return
 	}
 
-	typeFilter := r.URL.Query().Get("type")
-	desktops, err := s.desktops.List(r.Context(), typeFilter)
-	if err != nil {
+	// Check for name collision with VMs.
+	if vbox.VMExists(ctx, name) {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":   "name_exists",
+			"message": fmt.Sprintf("name %q is already used by a VM; choose a different name", name),
+		})
+		return
+	}
+
+	store := s.desktops.Store()
+	if err := store.Add(name, cfg); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":   "name_exists",
+			"message": err.Error(),
+		})
+		return
+	}
+	if err := store.Save(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error":   "tool_error",
 			"message": err.Error(),
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"desktops": desktops})
+
+	port := cfg.Port
+	if port == 0 {
+		port = 3389
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"name": name,
+		"type": "rdp",
+		"host": fmt.Sprintf("%s:%d", cfg.Host, port),
+	})
 }
 
 func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
@@ -750,6 +671,11 @@ func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
 	action := ""
 	if len(parts) > 1 {
 		action = parts[1]
+	}
+
+	// Support ?action= query param when no path-segment action is present.
+	if action == "" {
+		action = r.URL.Query().Get("action")
 	}
 
 	if name == "" {
@@ -772,6 +698,15 @@ func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	// GET /desktops/{id} — single desktop status
+	case r.Method == http.MethodGet && action == "":
+		s.getDesktopStatus(w, ctx, name)
+
+	// DELETE /desktops/{id} — destroy desktop
+	case r.Method == http.MethodDelete && action == "":
+		s.deleteDesktop(w, ctx, name)
+
+	// Session management
 	case r.Method == http.MethodPost && action == "up":
 		if err := s.desktops.Up(ctx, name); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -805,7 +740,27 @@ func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"name": name, "status": "shutdown"})
 
-	// Forward VM-only power commands
+	// VM power commands (path-segment or ?action=)
+	case r.Method == http.MethodPost && action == "start":
+		if err := s.manager.Start(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "running"})
+
+	case r.Method == http.MethodPost && action == "stop":
+		if err := s.manager.Stop(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "poweroff"})
+
 	case r.Method == http.MethodPost && action == "pause":
 		if err := s.manager.Pause(ctx, name); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -839,6 +794,72 @@ func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// getDesktopStatus returns the status of a single desktop.
+func (s *Server) getDesktopStatus(w http.ResponseWriter, ctx context.Context, name string) {
+	desktops, err := s.desktops.List(ctx, "")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":   "tool_error",
+			"message": err.Error(),
+		})
+		return
+	}
+	for _, d := range desktops {
+		if d.Name == name {
+			writeJSON(w, http.StatusOK, d)
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{
+		"error":   "not_found",
+		"message": fmt.Sprintf("desktop %q not found", name),
+	})
+}
+
+// deleteDesktop removes a desktop (VM or RDP) and disconnects any active session.
+func (s *Server) deleteDesktop(w http.ResponseWriter, ctx context.Context, name string) {
+	// Disconnect any active session first.
+	_ = s.desktops.Down(ctx, name, false, false)
+
+	// Clean up cached tools for this desktop.
+	s.toolsMu.Lock()
+	delete(s.computers, name)
+	delete(s.computerDskt, name)
+	delete(s.bashes, name)
+	s.toolsMu.Unlock()
+
+	// Try as VM first.
+	if vbox.VMExists(ctx, name) {
+		if err := s.manager.Delete(ctx, name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":   "tool_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"name": name, "type": "vm", "state": "deleted"})
+		return
+	}
+
+	// Try as RDP connection.
+	store := s.desktops.Store()
+	if err := store.Remove(name); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"error":   "not_found",
+			"message": fmt.Sprintf("desktop %q not found (not a VM and not an RDP connection)", name),
+		})
+		return
+	}
+	if err := store.Save(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":   "tool_error",
+			"message": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "type": "rdp", "state": "deleted"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

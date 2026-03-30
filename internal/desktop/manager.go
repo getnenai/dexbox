@@ -44,6 +44,11 @@ func (m *Manager) VBoxManager() *vbox.Manager {
 	return m.vbox
 }
 
+// Store returns the RDP connection store.
+func (m *Manager) Store() *ConnectionStore {
+	return m.store
+}
+
 // Up brings a desktop online. For VMs: boots if needed + connects SOAP.
 // For RDP: verifies guacd is running and the target is reachable.
 //

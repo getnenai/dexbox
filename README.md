@@ -149,15 +149,18 @@ Your Agent Framework (Vercel AI SDK, LangChain, etc.)
   │  5. Dexbox executes, returns result in the model's format
   v
 Dexbox Tool Server (:8600)
-  ├── /tools               →  model-agnostic JSON Schema for all tools
-  ├── /actions             →  execute a tool action (model-specific format)
-  ├── /actions/batch       →  batch sequential actions
-  ├── /vm                  →  VM lifecycle (create, start, stop, pause, resume, destroy)
-  ├── /desktops            →  list all desktops (VMs + RDP)
-  ├── /desktops/<n>/up     →  bring a desktop online
-  ├── /desktops/<n>/down   →  disconnect / shut down a desktop
-  ├── /desktops/<n>/view   →  browser-based remote desktop viewer (HTML)
-  ├── /desktops/<n>/tunnel →  WebSocket tunnel to guacd (Guacamole protocol)
+  ├── /tools                    →  model-agnostic JSON Schema for all tools
+  ├── /actions                  →  execute a tool action (model-specific format)
+  ├── /actions/batch            →  batch sequential actions
+  ├── GET    /desktops          →  list all desktops (VMs + RDP)
+  ├── POST   /desktops          →  register a new RDP connection
+  ├── GET    /desktops/<n>      →  single desktop status
+  ├── DELETE /desktops/<n>      →  destroy a desktop
+  ├── POST   /desktops/<n>?action=start|stop|pause|resume|suspend
+  ├── POST   /desktops/<n>/up   →  connect a desktop session
+  ├── POST   /desktops/<n>/down →  disconnect / shut down a desktop
+  ├── /desktops/<n>/view        →  browser-based remote desktop viewer (HTML)
+  ├── /desktops/<n>/tunnel      →  WebSocket tunnel to guacd (Guacamole protocol)
   └── /health
          │
          ├── computer  →  VBoxManage (screenshots, scancodes) + SOAP (mouse)
@@ -220,32 +223,9 @@ curl -X POST 'localhost:8600/actions/batch?model=claude-sonnet-4-5-20250929' \
   ]'
 ```
 
-### VM lifecycle
+### Desktop lifecycle
 
-```bash
-# List VMs
-curl localhost:8600/vm
-
-# Create a new VM
-curl -X POST localhost:8600/vm -d '{"name":"my-vm"}'
-
-# Start / stop / pause / suspend / resume
-curl -X POST localhost:8600/vm/my-vm/start
-curl -X POST localhost:8600/vm/my-vm/stop
-curl -X POST localhost:8600/vm/my-vm/pause
-curl -X POST localhost:8600/vm/my-vm/suspend
-curl -X POST localhost:8600/vm/my-vm/resume
-
-# Status
-curl localhost:8600/vm/my-vm/status
-
-# Destroy
-curl -X DELETE localhost:8600/vm/my-vm
-```
-
-### Desktop lifecycle (VMs and RDP)
-
-A unified API over all desktop types (VMs and RDP connections).
+Manage desktops (VMs and RDP connections) through a unified API.
 
 ```bash
 # List all desktops
@@ -253,7 +233,21 @@ curl localhost:8600/desktops
 curl 'localhost:8600/desktops?type=vm'
 curl 'localhost:8600/desktops?type=rdp'
 
-# Bring a desktop online
+# Register an RDP connection
+curl -X POST localhost:8600/desktops \
+  -d '{"type":"rdp","name":"my-server","host":"192.168.1.100","username":"Admin","password":"secret"}'
+
+# Get single desktop status
+curl localhost:8600/desktops/my-vm
+
+# Start / stop / pause / suspend / resume (VM only)
+curl -X POST 'localhost:8600/desktops/my-vm?action=start'
+curl -X POST 'localhost:8600/desktops/my-vm?action=stop'
+curl -X POST 'localhost:8600/desktops/my-vm?action=pause'
+curl -X POST 'localhost:8600/desktops/my-vm?action=suspend'
+curl -X POST 'localhost:8600/desktops/my-vm?action=resume'
+
+# Bring a desktop online (connect session)
 curl -X POST localhost:8600/desktops/my-desktop/up
 
 # Disconnect (session only, VM keeps running)
@@ -271,6 +265,9 @@ curl -X POST 'localhost:8600/desktops/down-all?force=true'
 
 # Browser viewer (returns HTML, open in browser)
 curl localhost:8600/desktops/my-desktop/view
+
+# Destroy a desktop
+curl -X DELETE localhost:8600/desktops/my-vm
 ```
 
 ### Error responses
@@ -278,8 +275,8 @@ curl localhost:8600/desktops/my-desktop/view
 ```json
 400  {"error": "bad_request",    "message": "field 'coordinate' required for action 'left_click'"}
 400  {"error": "unknown_model",  "message": "Unknown model 'foo'", "supported_prefixes": ["claude-","gpt-","o1-","o3-","gemini-"]}
-404  {"error": "vm_not_found",   "message": "VM 'foobar' does not exist"}
-409  {"error": "vm_exists",      "message": "VM 'my-vm' already exists"}
+404  {"error": "not_found",      "message": "desktop 'foobar' not found"}
+409  {"error": "name_exists",    "message": "VM 'my-vm' already exists"}
 502  {"error": "vm_unavailable", "message": "VM 'my-vm' is not running"}
 500  {"error": "tool_error",     "message": "VBoxManage screenshotpng failed: ..."}
 ```
