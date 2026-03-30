@@ -90,9 +90,9 @@ func TestExecuteAction_VMDesktop(t *testing.T) {
 	injectSession(t, srv, vm)
 
 	action := &tools.CanonicalAction{
-		Tool: "computer",
+		Tool:   "computer",
+		Action: "left_click",
 		Params: map[string]any{
-			"action":     "left_click",
 			"coordinate": []any{float64(100), float64(200)},
 		},
 	}
@@ -125,9 +125,9 @@ func TestExecuteAction_RDPDesktop(t *testing.T) {
 	injectSession(t, srv, rdp)
 
 	action := &tools.CanonicalAction{
-		Tool: "computer",
+		Tool:   "computer",
+		Action: "left_click",
 		Params: map[string]any{
-			"action":     "left_click",
 			"coordinate": []any{float64(50), float64(75)},
 		},
 	}
@@ -155,10 +155,8 @@ func TestExecuteAction_RDPScreenshot(t *testing.T) {
 	injectSession(t, srv, rdp)
 
 	action := &tools.CanonicalAction{
-		Tool: "computer",
-		Params: map[string]any{
-			"action": "screenshot",
-		},
+		Tool:   "computer",
+		Action: "screenshot",
 	}
 
 	req := httptest.NewRequest("POST", "/actions?desktop=test-rdp", nil)
@@ -178,10 +176,10 @@ func TestExecuteAction_RDPTypeText(t *testing.T) {
 	injectSession(t, srv, rdp)
 
 	action := &tools.CanonicalAction{
-		Tool: "computer",
+		Tool:   "computer",
+		Action: "type",
 		Params: map[string]any{
-			"action": "type",
-			"text":   "hello rdp",
+			"text": "hello rdp",
 		},
 	}
 
@@ -553,6 +551,39 @@ func TestHandleDesktopNamed_ActionQueryParam(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 (nil vbox manager), got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleDesktops_CreateRDP_DuplicateName verifies that creating a second
+// RDP connection with the same name returns a 409 Conflict.
+func TestHandleDesktops_CreateRDP_DuplicateName(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Seed an existing RDP connection directly in the store.
+	store := srv.DesktopManager().Store()
+	if err := store.Add("existing-rdp", desktop.RDPConfig{Host: "10.0.0.1", Port: 3389}); err != nil {
+		t.Fatalf("failed to seed store: %v", err)
+	}
+
+	body := `{"type":"rdp","name":"existing-rdp","host":"10.0.0.2"}`
+	req := httptest.NewRequest("POST", "/desktops", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.handleCreateDesktop(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 409 Conflict for duplicate name, got %d: %s", resp.StatusCode, respBody)
+	}
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["error"] != "name_exists" {
+		t.Errorf("expected error 'name_exists', got %v", result["error"])
 	}
 }
 

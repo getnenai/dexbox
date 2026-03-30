@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -107,7 +108,7 @@ func rdpReachable(host string, port int) bool {
 		candidates = append(candidates, "localhost")
 	}
 	for _, h := range candidates {
-		addr := fmt.Sprintf("%s:%d", h, port)
+		addr := net.JoinHostPort(h, strconv.Itoa(port))
 		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 		if err == nil {
 			conn.Close()
@@ -165,14 +166,16 @@ func (m *Manager) DownAll(ctx context.Context, force bool) error {
 	}
 
 	// Shutdown all running VMs
-	vms, err := m.vbox.List(ctx)
-	if err == nil {
-		for _, vm := range vms {
-			if vm.State == "running" {
-				if force {
-					_ = m.vbox.Poweroff(ctx, vm.Name)
-				} else {
-					_ = m.vbox.Stop(ctx, vm.Name)
+	if m.vbox != nil {
+		vms, err := m.vbox.List(ctx)
+		if err == nil {
+			for _, vm := range vms {
+				if vm.State == "running" {
+					if force {
+						_ = m.vbox.Poweroff(ctx, vm.Name)
+					} else {
+						_ = m.vbox.Stop(ctx, vm.Name)
+					}
 				}
 			}
 		}
