@@ -13,18 +13,6 @@ import (
 	"github.com/deluan/bring"
 )
 
-// bringClient is the subset of *bring.Client used by RDP, extracted so
-// tests can substitute a lightweight mock without a real guacd connection.
-type bringClient interface {
-	Start()
-	Stop()
-	State() bring.SessionState
-	Screen() (image.Image, int64)
-	SendMouse(p image.Point, pressedButtons ...bring.MouseButton) error
-	SendText(sequence string) error
-	SendKey(key bring.KeyCode, pressed bool) error
-}
-
 // RDP implements Desktop using deluan/bring to talk to a guacd daemon
 // which proxies the actual RDP connection.
 type RDP struct {
@@ -113,16 +101,18 @@ func (r *RDP) Connect(ctx context.Context) error {
 
 func (r *RDP) Disconnect() error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	if r.client == nil {
+		r.mu.Unlock()
 		return nil
 	}
 
-	// The bring client doesn't expose a Close/Disconnect method.
-	// Setting client to nil and letting the GC clean up is the best we can do.
-	// The underlying TCP connection will be closed when the client is GC'd.
+	r.client.Stop()
+	done := r.done
 	r.client = nil
+	r.mu.Unlock()
+
+	<-done // wait for the Start() goroutine to exit
 	return nil
 }
 
