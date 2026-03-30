@@ -149,18 +149,16 @@ Your Agent Framework (Vercel AI SDK, LangChain, etc.)
   │  5. Dexbox executes, returns result in the model's format
   v
 Dexbox Tool Server (:8600)
-  ├── /tools                    →  model-agnostic JSON Schema for all tools
-  ├── /actions                  →  execute a tool action (model-specific format)
-  ├── /actions/batch            →  batch sequential actions
-  ├── GET    /desktops          →  list all desktops (VMs + RDP)
-  ├── POST   /desktops          →  register a new RDP connection
-  ├── GET    /desktops/<n>      →  single desktop status
-  ├── DELETE /desktops/<n>      →  destroy a desktop
-  ├── POST   /desktops/<n>?action=start|stop|pause|resume|suspend
-  ├── POST   /desktops/<n>/up   →  connect a desktop session
-  ├── POST   /desktops/<n>/down →  disconnect / shut down a desktop
-  ├── /desktops/<n>/view        →  browser-based remote desktop viewer (HTML)
-  ├── /desktops/<n>/tunnel      →  WebSocket tunnel to guacd (Guacamole protocol)
+  ├── /tools                        →  model-agnostic JSON Schema for all tools
+  ├── /actions                      →  execute a tool action (model-specific format)
+  ├── /actions/batch                →  batch sequential actions
+  ├── GET    /desktops              →  list all desktops (VMs + RDP)
+  ├── POST   /desktops              →  register a new RDP connection
+  ├── GET    /desktops/<n>          →  single desktop status
+  ├── DELETE /desktops/<n>          →  destroy a desktop
+  ├── POST   /desktops/<n>?action=up|down|pause|resume|suspend
+  ├── /desktops/<n>/view            →  browser-based remote desktop viewer (HTML)
+  ├── /desktops/<n>/tunnel          →  WebSocket tunnel to guacd (Guacamole protocol)
   └── /health
          │
          ├── computer  →  VBoxManage (screenshots, scancodes) + SOAP (mouse)
@@ -240,24 +238,22 @@ curl -X POST localhost:8600/desktops \
 # Get single desktop status
 curl localhost:8600/desktops/my-vm
 
-# Start / stop / pause / suspend / resume (VM only)
-curl -X POST 'localhost:8600/desktops/my-vm?action=start'
-curl -X POST 'localhost:8600/desktops/my-vm?action=stop'
+# VM power control
 curl -X POST 'localhost:8600/desktops/my-vm?action=pause'
 curl -X POST 'localhost:8600/desktops/my-vm?action=suspend'
 curl -X POST 'localhost:8600/desktops/my-vm?action=resume'
 
 # Bring a desktop online (connect session)
-curl -X POST localhost:8600/desktops/my-desktop/up
+curl -X POST 'localhost:8600/desktops/my-desktop?action=up'
 
 # Disconnect (session only, VM keeps running)
-curl -X POST localhost:8600/desktops/my-desktop/down
+curl -X POST 'localhost:8600/desktops/my-desktop?action=down'
 
 # Disconnect + ACPI shutdown (VM only)
-curl -X POST 'localhost:8600/desktops/my-desktop/down?shutdown=true'
+curl -X POST 'localhost:8600/desktops/my-desktop?action=down&shutdown=true'
 
 # Hard poweroff (VM only)
-curl -X POST 'localhost:8600/desktops/my-desktop/down?shutdown=true&force=true'
+curl -X POST 'localhost:8600/desktops/my-desktop?action=down&shutdown=true&force=true'
 
 # Shut everything down
 curl -X POST localhost:8600/desktops/down-all

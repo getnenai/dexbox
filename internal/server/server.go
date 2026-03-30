@@ -94,38 +94,34 @@ func (s *Server) Run() error {
 	startTime := time.Now()
 
 	// Tool routes
-	mux.HandleFunc("/tools", s.handleGetToolSchema)
-	mux.HandleFunc("/actions", s.handleAction)
-	mux.HandleFunc("/actions/batch", s.handleBatchAction)
+	mux.HandleFunc("GET /tools", s.handleGetToolSchema)
+	mux.HandleFunc("POST /actions", s.handleAction)
+	mux.HandleFunc("POST /actions/batch", s.handleBatchAction)
 
 	// Desktop routes
-	mux.HandleFunc("/desktops", s.handleDesktops)
+	mux.HandleFunc("GET /desktops", s.handleListDesktops)
+	mux.HandleFunc("POST /desktops", s.handleCreateDesktop)
+	mux.HandleFunc("POST /desktops/down-all", s.handleDownAll)
+	mux.HandleFunc("GET /desktops/{name}", s.handleGetDesktop)
+	mux.HandleFunc("POST /desktops/{name}", s.handleDesktopAction)
+	mux.HandleFunc("DELETE /desktops/{name}", s.handleDeleteDesktop)
 
-	// Browser UI (view/tunnel) and desktop API share the /desktops/ prefix.
+	// Browser UI (view/tunnel).
 	// Reuse the store from the desktop manager so API-created connections
 	// are immediately visible in the browser UI.
 	webHandler := web.Handler(s.desktops.Store(), s.manager, "localhost:4822")
-
-	mux.HandleFunc("/desktops/", func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/desktops/")
-		parts := strings.SplitN(path, "/", 2)
-		action := ""
-		if len(parts) > 1 {
-			action = parts[1]
-		}
-		// Route view/tunnel to web handler, everything else to desktop API
-		if action == "view" || action == "tunnel" {
-			webHandler.ServeHTTP(w, r)
-		} else {
-			s.handleDesktopNamed(w, r)
-		}
+	mux.HandleFunc("GET /desktops/{name}/view", func(w http.ResponseWriter, r *http.Request) {
+		webHandler.ServeHTTP(w, r)
+	})
+	mux.HandleFunc("GET /desktops/{name}/tunnel", func(w http.ResponseWriter, r *http.Request) {
+		webHandler.ServeHTTP(w, r)
 	})
 
 	// Static assets
 	mux.Handle("/static/", web.StaticHandler())
 
 	// Health
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":         "ok",
 			"uptime_seconds": time.Since(startTime).Seconds(),
@@ -161,19 +157,11 @@ func (s *Server) Run() error {
 // --- Tool routes ---
 
 func (s *Server) handleGetToolSchema(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
 	schemas := tools.AllToolSchemas(s.display)
 	writeJSON(w, http.StatusOK, schemas)
 }
 
 func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
 
 	modelID := r.URL.Query().Get("model")
 	adapter, err := tools.AdapterForModel(modelID)
@@ -251,10 +239,6 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBatchAction(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
 
 	modelID := r.URL.Query().Get("model")
 	adapter, err := tools.AdapterForModel(modelID)
@@ -550,62 +534,57 @@ func (s *Server) getBashTool(vmName string) *tools.BashTool {
 
 
 
-// --- Desktop routes ---
+// --- Unified desktop routes ---
 
-func (s *Server) handleDesktops(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleListDesktops(w http.ResponseWriter, r *http.Request) {
+	typeFilter := r.URL.Query().Get("type")
+	desktops, err := s.desktops.List(r.Context(), typeFilter)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":   "tool_error",
+			"message": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"desktops": desktops})
+}
+
+func (s *Server) handleCreateDesktop(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	switch r.Method {
-	case http.MethodGet:
-		typeFilter := r.URL.Query().Get("type")
-		desktops, err := s.desktops.List(ctx, typeFilter)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"desktops": desktops})
+	var req struct {
+		Type     string `json:"type"` // "vm" or "rdp"
+		Name     string `json:"name,omitempty"`
+		Host     string `json:"host,omitempty"`
+		Port     int    `json:"port,omitempty"`
+		Username string `json:"username,omitempty"`
+		Password string `json:"password,omitempty"`
+		Width    int    `json:"width,omitempty"`
+		Height   int    `json:"height,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": "invalid JSON body",
+		})
+		return
+	}
 
-	case http.MethodPost:
-		var req struct {
-			Type     string `json:"type"` // "vm" or "rdp"
-			Name     string `json:"name,omitempty"`
-			Host     string `json:"host,omitempty"`
-			Port     int    `json:"port,omitempty"`
-			Username string `json:"username,omitempty"`
-			Password string `json:"password,omitempty"`
-			Width    int    `json:"width,omitempty"`
-			Height   int    `json:"height,omitempty"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error":   "bad_request",
-				"message": "invalid JSON body",
-			})
-			return
-		}
-
-		switch req.Type {
-		case "rdp", "":
-			s.createRDP(w, ctx, req.Name, desktop.RDPConfig{
-				Host:     req.Host,
-				Port:     req.Port,
-				Username: req.Username,
-				Password: req.Password,
-				Width:    req.Width,
-				Height:   req.Height,
-			})
-		default:
-			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error":   "bad_request",
-				"message": fmt.Sprintf("unknown desktop type %q (use: rdp)", req.Type),
-			})
-		}
-
+	switch req.Type {
+	case "rdp", "":
+		s.createRDP(w, ctx, req.Name, desktop.RDPConfig{
+			Host:     req.Host,
+			Port:     req.Port,
+			Username: req.Username,
+			Password: req.Password,
+			Width:    req.Width,
+			Height:   req.Height,
+		})
 	default:
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": fmt.Sprintf("unknown desktop type %q (use: rdp)", req.Type),
+		})
 	}
 }
 
@@ -665,52 +644,30 @@ func (s *Server) createRDP(w http.ResponseWriter, ctx context.Context, name stri
 	})
 }
 
-func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleDownAll(w http.ResponseWriter, r *http.Request) {
+	force := r.URL.Query().Get("force") == "true"
+	if err := s.desktops.DownAll(r.Context(), force); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":   "tool_error",
+			"message": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "all_down"})
+}
+
+func (s *Server) handleGetDesktop(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	s.getDesktopStatus(w, r.Context(), name)
+}
+
+func (s *Server) handleDesktopAction(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	name := r.PathValue("name")
+	action := r.URL.Query().Get("action")
 
-	path := strings.TrimPrefix(r.URL.Path, "/desktops/")
-	parts := strings.SplitN(path, "/", 2)
-	name := parts[0]
-	action := ""
-	if len(parts) > 1 {
-		action = parts[1]
-	}
-
-	// Support ?action= query param when no path-segment action is present.
-	if action == "" {
-		action = r.URL.Query().Get("action")
-	}
-
-	if name == "" {
-		http.NotFound(w, r)
-		return
-	}
-
-	// Special routes that don't require an existing desktop
-	if name == "down-all" && r.Method == http.MethodPost {
-		force := r.URL.Query().Get("force") == "true"
-		if err := s.desktops.DownAll(ctx, force); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "all_down"})
-		return
-	}
-
-	switch {
-	// GET /desktops/{id} — single desktop status
-	case r.Method == http.MethodGet && action == "":
-		s.getDesktopStatus(w, ctx, name)
-
-	// DELETE /desktops/{id} — destroy desktop
-	case r.Method == http.MethodDelete && action == "":
-		s.deleteDesktop(w, ctx, name)
-
-	// Session management
-	case r.Method == http.MethodPost && action == "up":
+	switch action {
+	case "up":
 		if err := s.desktops.Up(ctx, name); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"error":   "tool_error",
@@ -720,7 +677,7 @@ func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"name": name, "status": "up"})
 
-	case r.Method == http.MethodPost && action == "down":
+	case "down":
 		shutdown := r.URL.Query().Get("shutdown") == "true"
 		force := r.URL.Query().Get("force") == "true"
 		if err := s.desktops.Down(ctx, name, shutdown, force); err != nil {
@@ -730,45 +687,10 @@ func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		s.clearToolCache(name)
 		writeJSON(w, http.StatusOK, map[string]any{"name": name, "status": "down"})
 
-	case r.Method == http.MethodPost && action == "shutdown":
-		force := r.URL.Query().Get("force") == "true"
-		if err := s.desktops.Down(ctx, name, true, force); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"name": name, "status": "shutdown"})
-
-	// VM power commands (path-segment or ?action=)
-	case r.Method == http.MethodPost && action == "start":
-		if !s.requireVBox(w) {
-			return
-		}
-		if err := s.manager.Start(ctx, name); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "running"})
-
-	case r.Method == http.MethodPost && action == "stop":
-		if err := s.desktops.Down(ctx, name, true, false); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":   "tool_error",
-				"message": err.Error(),
-			})
-			return
-		}
-		s.clearToolCache(name)
-		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "poweroff"})
-
-	case r.Method == http.MethodPost && action == "pause":
+	case "pause":
 		if !s.requireVBox(w) {
 			return
 		}
@@ -781,7 +703,7 @@ func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "paused"})
 
-	case r.Method == http.MethodPost && action == "suspend":
+	case "suspend":
 		if !s.requireVBox(w) {
 			return
 		}
@@ -792,12 +714,11 @@ func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		// Clear session and cached tools since the VM is no longer running.
 		_ = s.desktops.Down(ctx, name, false, false)
 		s.clearToolCache(name)
 		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "saved"})
 
-	case r.Method == http.MethodPost && action == "resume":
+	case "resume":
 		if !s.requireVBox(w) {
 			return
 		}
@@ -811,8 +732,16 @@ func (s *Server) handleDesktopNamed(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"name": name, "state": "running"})
 
 	default:
-		http.NotFound(w, r)
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": fmt.Sprintf("unknown action %q; supported: up, down, pause, suspend, resume", action),
+		})
 	}
+}
+
+func (s *Server) handleDeleteDesktop(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	s.deleteDesktop(w, r.Context(), name)
 }
 
 // getDesktopStatus returns the status of a single desktop.

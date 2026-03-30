@@ -399,7 +399,7 @@ func TestHandleDesktops_CreateRDP(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
-	srv.handleDesktops(w, req)
+	srv.handleCreateDesktop(w, req)
 
 	resp := w.Result()
 	defer resp.Body.Close()
@@ -438,7 +438,7 @@ func TestHandleDesktops_CreateRDP_MissingHost(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
-	srv.handleDesktops(w, req)
+	srv.handleCreateDesktop(w, req)
 
 	resp := w.Result()
 	defer resp.Body.Close()
@@ -464,9 +464,10 @@ func TestHandleDesktopNamed_GetStatus(t *testing.T) {
 	})
 
 	req := httptest.NewRequest("GET", "/desktops/status-rdp", nil)
+	req.SetPathValue("name", "status-rdp")
 	w := httptest.NewRecorder()
 
-	srv.handleDesktopNamed(w, req)
+	srv.handleGetDesktop(w, req)
 
 	resp := w.Result()
 	defer resp.Body.Close()
@@ -501,9 +502,10 @@ func TestHandleDesktopNamed_Delete(t *testing.T) {
 	})
 
 	req := httptest.NewRequest("DELETE", "/desktops/del-rdp", nil)
+	req.SetPathValue("name", "del-rdp")
 	w := httptest.NewRecorder()
 
-	srv.handleDesktopNamed(w, req)
+	srv.handleDeleteDesktop(w, req)
 
 	resp := w.Result()
 	defer resp.Body.Close()
@@ -536,9 +538,10 @@ func TestHandleDesktopNamed_ActionQueryParam(t *testing.T) {
 	// Without a real VBox manager, pause will fail — but the important
 	// thing is that it routes correctly (500 from nil manager, not 404).
 	req := httptest.NewRequest("POST", "/desktops/some-vm?action=pause", nil)
+	req.SetPathValue("name", "some-vm")
 	w := httptest.NewRecorder()
 
-	srv.handleDesktopNamed(w, req)
+	srv.handleDesktopAction(w, req)
 
 	resp := w.Result()
 	defer resp.Body.Close()
@@ -553,20 +556,8 @@ func TestHandleDesktopNamed_ActionQueryParam(t *testing.T) {
 	}
 }
 
-// TestHandleDesktops_MethodNotAllowed verifies that unsupported HTTP methods
-// on /desktops return 405.
-func TestHandleDesktops_MethodNotAllowed(t *testing.T) {
-	srv := newTestServer(t)
-
-	req := httptest.NewRequest("PATCH", "/desktops", nil)
-	w := httptest.NewRecorder()
-
-	srv.handleDesktops(w, req)
-
-	resp := w.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405 for PATCH, got %d", resp.StatusCode)
-	}
-}
+// TestHandleDesktops_MethodNotAllowed is no longer needed because
+// Go 1.22 method-based routing returns 405 automatically.
+// Removed: the old handleDesktops handler that manually checked r.Method
+// is replaced by separate handleListDesktops (GET) and handleCreateDesktop (POST)
+// registered with method prefixes.
