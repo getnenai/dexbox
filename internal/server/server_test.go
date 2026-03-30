@@ -378,3 +378,186 @@ func TestHandleAction_UnknownDesktop(t *testing.T) {
 		t.Errorf("expected vm_unavailable error, got %v", result["error"])
 	}
 }
+
+// --- Control API tests ---
+
+// TestHandleDesktops_CreateRDP verifies POST /desktops with type=rdp creates
+// an RDP connection in the store.
+func TestHandleDesktops_CreateRDP(t *testing.T) {
+	srv := newTestServer(t)
+
+	body := `{
+		"type": "rdp",
+		"name": "test-rdp",
+		"host": "192.168.1.100",
+		"port": 3389,
+		"username": "admin",
+		"password": "secret"
+	}`
+
+	req := httptest.NewRequest("POST", "/desktops", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.handleCreateDesktop(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 201, got %d: %s", resp.StatusCode, respBody)
+	}
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["name"] != "test-rdp" {
+		t.Errorf("expected name 'test-rdp', got %v", result["name"])
+	}
+	if result["type"] != "rdp" {
+		t.Errorf("expected type 'rdp', got %v", result["type"])
+	}
+
+	// Verify the connection was stored
+	cfg, ok := srv.DesktopManager().Store().Get("test-rdp")
+	if !ok {
+		t.Fatal("RDP connection not found in store after creation")
+	}
+	if cfg.Host != "192.168.1.100" {
+		t.Errorf("stored host = %q, want '192.168.1.100'", cfg.Host)
+	}
+}
+
+// TestHandleDesktops_CreateRDP_MissingHost verifies that creating an RDP
+// connection without a host returns a 400 error.
+func TestHandleDesktops_CreateRDP_MissingHost(t *testing.T) {
+	srv := newTestServer(t)
+
+	body := `{"type": "rdp", "name": "test-rdp"}`
+	req := httptest.NewRequest("POST", "/desktops", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.handleCreateDesktop(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleDesktopNamed_GetStatus verifies GET /desktops/{id} returns the
+// status of a single desktop.
+func TestHandleDesktopNamed_GetStatus(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Seed an RDP connection so the desktop is always listable
+	// (no VBox needed).
+	store := srv.DesktopManager().Store()
+	store.Add("status-rdp", desktop.RDPConfig{
+		Host:     "10.0.0.1",
+		Port:     3389,
+		Username: "test",
+		Password: "test",
+	})
+
+	req := httptest.NewRequest("GET", "/desktops/status-rdp", nil)
+	req.SetPathValue("name", "status-rdp")
+	w := httptest.NewRecorder()
+
+	srv.handleGetDesktop(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, respBody)
+	}
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["name"] != "status-rdp" {
+		t.Errorf("expected name 'status-rdp', got %v", result["name"])
+	}
+	if result["type"] != "rdp" {
+		t.Errorf("expected type 'rdp', got %v", result["type"])
+	}
+}
+
+// TestHandleDesktopNamed_Delete verifies DELETE /desktops/{id} removes
+// an RDP connection and cleans up.
+func TestHandleDesktopNamed_Delete(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Seed an RDP connection in the store
+	store := srv.DesktopManager().Store()
+	store.Add("del-rdp", desktop.RDPConfig{
+		Host:     "10.0.0.1",
+		Port:     3389,
+		Username: "test",
+		Password: "test",
+	})
+
+	req := httptest.NewRequest("DELETE", "/desktops/del-rdp", nil)
+	req.SetPathValue("name", "del-rdp")
+	w := httptest.NewRecorder()
+
+	srv.handleDeleteDesktop(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, respBody)
+	}
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["type"] != "rdp" {
+		t.Errorf("expected type 'rdp', got %v", result["type"])
+	}
+	if result["state"] != "deleted" {
+		t.Errorf("expected state 'deleted', got %v", result["state"])
+	}
+
+	// Verify it was actually removed
+	if _, ok := store.Get("del-rdp"); ok {
+		t.Error("RDP connection still exists after DELETE")
+	}
+}
+
+// TestHandleDesktopNamed_ActionQueryParam verifies that POST /desktops/{id}?action=pause
+// dispatches to the pause handler (via query param rather than path segment).
+func TestHandleDesktopNamed_ActionQueryParam(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Without a real VBox manager, pause will fail — but the important
+	// thing is that it routes correctly (500 from nil manager, not 404).
+	req := httptest.NewRequest("POST", "/desktops/some-vm?action=pause", nil)
+	req.SetPathValue("name", "some-vm")
+	w := httptest.NewRecorder()
+
+	srv.handleDesktopAction(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	// 503 means the handler dispatched correctly but no VBox manager is configured.
+	// 404 would mean the action= query param wasn't parsed.
+	if resp.StatusCode == http.StatusNotFound {
+		t.Fatal("?action=pause returned 404 — query param dispatch not working")
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (nil vbox manager), got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleDesktops_MethodNotAllowed is no longer needed because
+// Go 1.22 method-based routing returns 405 automatically.
+// Removed: the old handleDesktops handler that manually checked r.Method
+// is replaced by separate handleListDesktops (GET) and handleCreateDesktop (POST)
+// registered with method prefixes.
