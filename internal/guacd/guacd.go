@@ -5,6 +5,7 @@ package guacd
 import (
 	"context"
 	"fmt"
+	"net"
 	"os/exec"
 	"strings"
 	"time"
@@ -59,8 +60,25 @@ func IsRunning(ctx context.Context) (bool, error) {
 	return strings.TrimSpace(out) == "true", nil
 }
 
+// IsListening reports whether something is already accepting connections on
+// DefaultAddr, regardless of Docker. Used as a fallback when Docker is
+// unavailable but guacd was started externally.
+func IsListening() bool {
+	conn, err := net.DialTimeout("tcp", DefaultAddr, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 // EnsureRunning starts guacd if it's not already running.
+// If Docker is unavailable but guacd is already listening on DefaultAddr,
+// this is treated as a success — useful when guacd was started externally.
 func EnsureRunning(ctx context.Context) error {
+	if IsListening() {
+		return nil
+	}
 	running, err := IsRunning(ctx)
 	if err != nil {
 		return err
