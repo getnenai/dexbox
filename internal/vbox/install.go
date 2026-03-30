@@ -22,25 +22,22 @@ import (
 var autounattendXML []byte
 
 const (
-	isoURL         = "https://software-static.download.prss.microsoft.com/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/22631.2428.231001-0608.23H2_NI_RELEASE_SVC_REFRESH_CLIENTENTERPRISEEVAL_OEMRET_x64FRE_en-us.iso"
 	virtioISOURL   = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
 	isoCacheDir    = ".dexbox/iso"
-	isoFilename    = "Win11_Enterprise_Eval.iso"
-	isoFilenameARM = "Win11_ARM_Enterprise_Eval.iso"
 	virtioFilename = "virtio-win.iso"
 )
 
-// Install runs the full provisioning flow: install VirtualBox, download ISO, create VM.
+// Install runs the full provisioning flow: install VirtualBox, validate ISO, create VM.
 // vmName is the name for the new VirtualBox VM.
-// isoOverride may be empty; if set it skips the download and uses the given path directly.
-func Install(ctx context.Context, vmName, isoOverride string) error {
+// isoPath is the path to a user-supplied Windows ISO.
+func Install(ctx context.Context, vmName, isoPath string) error {
 	// Step 1: Check/install VirtualBox
 	if err := ensureVirtualBox(); err != nil {
 		return fmt.Errorf("VirtualBox installation: %w", err)
 	}
 
-	// Step 2: Download Windows 11 ISO
-	isoPath, err := ensureISO(ctx, isoOverride)
+	// Step 2: Validate Windows ISO
+	isoPath, err := ensureISO(isoPath)
 	if err != nil {
 		return fmt.Errorf("ISO: %w", err)
 	}
@@ -239,49 +236,17 @@ func downloadFile(ctx context.Context, url, destPath, displayName string) error 
 	return nil
 }
 
-func ensureISO(ctx context.Context, providedPath string) (string, error) {
-	if providedPath != "" {
-		if _, err := os.Stat(providedPath); err != nil {
-			return "", fmt.Errorf("provided ISO not found: %w", err)
-		}
-		fmt.Printf("Using ISO: %s\n", providedPath)
-		return providedPath, nil
-	}
-
-	home, err := os.UserHomeDir()
+// ensureISO validates that the user-provided Windows ISO path is a regular file.
+func ensureISO(providedPath string) (string, error) {
+	info, err := os.Stat(providedPath)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("ISO not found: %w", err)
 	}
-
-	cacheDir := filepath.Join(home, isoCacheDir)
-
-	// On ARM hosts there is no stable auto-download URL for the Windows 11 ARM ISO.
-	if nativeArch() == "arm64" {
-		cachedPath := filepath.Join(cacheDir, isoFilenameARM)
-		if _, err := os.Stat(cachedPath); err == nil {
-			fmt.Printf("ISO already cached at %s\n", cachedPath)
-			return cachedPath, nil
-		}
-		return "", fmt.Errorf(
-			"Windows 11 ARM ISO not found.\n"+
-				"Download it from:\n\n"+
-				"  https://www.microsoft.com/en-us/software-download/windows11arm64\n\n"+
-				"Then run:\n\n"+
-				"  dexbox create vm <name> --iso /path/to/Windows11_ARM64.iso\n\n"+
-				"Or save it to: %s", cachedPath,
-		)
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("ISO path is not a regular file: %s", providedPath)
 	}
-
-	isoPath := filepath.Join(cacheDir, isoFilename)
-	if _, err := os.Stat(isoPath); err == nil {
-		fmt.Printf("ISO already cached at %s\n", isoPath)
-		return isoPath, nil
-	}
-
-	if err := downloadFile(ctx, isoURL, isoPath, "Windows 11 Enterprise Eval ISO"); err != nil {
-		return "", err
-	}
-	return isoPath, nil
+	fmt.Printf("Using ISO: %s\n", providedPath)
+	return providedPath, nil
 }
 
 // ensureVirtioISO downloads the virtio-win ISO (for ARM VMs that need the
