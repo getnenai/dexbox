@@ -545,22 +545,32 @@ func cmdCreateVM() *cobra.Command {
 		Long: `Install VirtualBox (if needed), then create and provision a Windows 11 VM.
 
 The VM name is used as the VirtualBox machine name and must be unique.
-On ARM hosts the --iso flag is required; on x86 the ISO is auto-downloaded.
+A Windows ISO must be provided via --iso or the DEXBOX_ISO environment variable.
 
 Example:
-  dexbox create vm desktop-1 --iso ~/Downloads/Win11_25H2_English_Arm64.iso`,
+  dexbox create vm desktop-1 --iso ~/Downloads/Win11_25H2_English_x64.iso
+
+  # Or set once via environment variable:
+  export DEXBOX_ISO=~/Downloads/Win11_25H2_English_x64.iso
+  dexbox create vm desktop-1`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
+			if isoPath == "" {
+				isoPath = os.Getenv("DEXBOX_ISO")
+			}
+			if isoPath == "" {
+				return fmt.Errorf("Windows ISO required: use --iso <path> or set DEXBOX_ISO")
+			}
 			expandedISO := isoPath
-			if isoPath != "" && len(isoPath) > 1 && isoPath[0] == '~' {
+			if len(isoPath) > 1 && isoPath[0] == '~' {
 				home, _ := os.UserHomeDir()
 				expandedISO = home + isoPath[1:]
 			}
 			return vbox.Install(context.Background(), name, expandedISO)
 		},
 	}
-	c.Flags().StringVar(&isoPath, "iso", "", "Path to Windows ISO (required on ARM; auto-downloaded on x86)")
+	c.Flags().StringVar(&isoPath, "iso", "", "Path to Windows ISO (or set DEXBOX_ISO)")
 	return c
 }
 
