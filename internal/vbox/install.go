@@ -236,10 +236,14 @@ func downloadFile(ctx context.Context, url, destPath, displayName string) error 
 	return nil
 }
 
-// ensureISO validates that the user-provided Windows ISO path exists.
+// ensureISO validates that the user-provided Windows ISO path is a regular file.
 func ensureISO(providedPath string) (string, error) {
-	if _, err := os.Stat(providedPath); err != nil {
+	info, err := os.Stat(providedPath)
+	if err != nil {
 		return "", fmt.Errorf("ISO not found: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("ISO path is not a regular file: %s", providedPath)
 	}
 	fmt.Printf("Using ISO: %s\n", providedPath)
 	return providedPath, nil
