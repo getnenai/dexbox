@@ -597,6 +597,13 @@ func (s *Server) createRDP(w http.ResponseWriter, ctx context.Context, name stri
 		})
 		return
 	}
+	if strings.Contains(name, "/") || name == "down-all" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": `name must be a single path segment and cannot be "down-all"`,
+		})
+		return
+	}
 	if cfg.Host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error":   "bad_request",
