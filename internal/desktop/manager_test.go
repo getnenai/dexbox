@@ -213,7 +213,9 @@ func TestManagerDown_NotifiesSessionDown(t *testing.T) {
 	ch, cancel := mgr.Subscribe("win")
 	defer cancel()
 
-	_ = mgr.Down(context.Background(), "win", false, false)
+	if err := mgr.Down(context.Background(), "win", false, false); err != nil {
+		t.Fatalf("Down failed: %v", err)
+	}
 
 	select {
 	case evt := <-ch:
@@ -237,7 +239,9 @@ func TestManagerDown_NoNotifyForVM(t *testing.T) {
 	ch, cancel := mgr.Subscribe("my-vm")
 	defer cancel()
 
-	_ = mgr.Down(context.Background(), "my-vm", false, false)
+	if err := mgr.Down(context.Background(), "my-vm", false, false); err != nil {
+		t.Fatalf("Down failed: %v", err)
+	}
 
 	select {
 	case evt := <-ch:
