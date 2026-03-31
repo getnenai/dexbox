@@ -83,7 +83,6 @@ func serveTunnel(w http.ResponseWriter, r *http.Request, name string, store *des
 		security = "any"
 	}
 	config.Parameters = map[string]string{
-		"VERSION_1_5_0":    "",
 		"hostname":         cfg.Host,
 		"port":             fmt.Sprintf("%d", cfg.Port),
 		"username":         cfg.Username,
