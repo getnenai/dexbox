@@ -39,6 +39,11 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 )
 
+// getnenai/guac mirrors wwt/guac with minor fixes needed for VRDE compatibility.
 replace github.com/wwt/guac => github.com/getnenai/guac v1.3.3
 
+// getnenai/bring forks deluan/bring to expose Client.ConnectionID(), which returns
+// the guacd connection ID after handshake. This is required so the browser tunnel
+// can join an active agent session read-only instead of opening a competing RDP
+// connection. See: https://github.com/getnenai/bring
 replace github.com/deluan/bring => github.com/getnenai/bring v0.0.8-nen-0.1

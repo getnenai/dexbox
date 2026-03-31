@@ -52,11 +52,16 @@
       var isReadonly = false;
       var keyboard = null; // created once; lives for the page lifetime
       var reconnectTimer = null;
+      var currentResizeHandler = null;
 
       function connectTunnel(readonly) {
         isReadonly = readonly;
 
         if (currentClient) {
+          if (currentResizeHandler) {
+            window.removeEventListener('resize', currentResizeHandler);
+            currentResizeHandler = null;
+          }
           currentClient.disconnect();
           currentClient = null;
           currentTunnel = null;
@@ -132,10 +137,11 @@
           }
         }
 
-        // Handle resize
+        // Handle resize — remove any prior listener before registering a new one.
         function resize() {
           currentClient.sendSize(window.innerWidth, window.innerHeight);
         }
+        currentResizeHandler = resize;
         window.addEventListener('resize', resize);
       }
 
@@ -169,11 +175,25 @@
       };
 
       evtSource.onerror = function() {
-        // SSE connection lost; the browser will retry automatically.
+        statusEl.textContent = 'reconnecting...';
+        statusEl.className = '';
+        statusEl.style.opacity = '1';
+      };
+
+      evtSource.onopen = function() {
+        // SSE reconnected — the next onmessage will set the correct state.
+        // Clear any "reconnecting..." banner left by onerror.
+        if (statusEl.textContent === 'reconnecting...') {
+          statusEl.textContent = '';
+          statusEl.className = '';
+        }
       };
 
       // Cleanup on page unload
       window.addEventListener('beforeunload', function() {
+        if (currentResizeHandler) {
+          window.removeEventListener('resize', currentResizeHandler);
+        }
         if (currentClient) currentClient.disconnect();
         evtSource.close();
       });

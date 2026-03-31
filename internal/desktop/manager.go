@@ -181,8 +181,9 @@ func (m *Manager) DownAll(ctx context.Context, force bool) error {
 	m.mu.Unlock()
 
 	// Disconnect all sessions
-	for _, d := range sessions {
+	for name, d := range sessions {
 		_ = d.Disconnect()
+		m.notify(name, SessionDown)
 	}
 
 	// Shutdown all running VMs
