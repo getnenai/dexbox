@@ -36,9 +36,8 @@ type desktopNameInput struct {
 }
 
 type stopDesktopInput struct {
-	Name     string `json:"name" jsonschema:"Desktop name"`
-	Shutdown bool   `json:"shutdown,omitempty" jsonschema:"Also shut down the VM guest OS (VM only)"`
-	Force    bool   `json:"force,omitempty" jsonschema:"Hard poweroff instead of graceful ACPI shutdown (VM only)"`
+	Name  string `json:"name" jsonschema:"Desktop name"`
+	Force bool   `json:"force,omitempty" jsonschema:"Hard poweroff instead of graceful ACPI shutdown (VM only)"`
 }
 
 // --- Helpers -----------------------------------------------------------
@@ -158,12 +157,9 @@ func New(baseURL string) *mcp.Server {
 	// stop_desktop
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "stop_desktop",
-		Description: "Disconnect a desktop session. Optionally shut down the VM guest OS.",
+		Description: "Disconnect a desktop session and shut down the VM guest OS.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input stopDesktopInput) (*mcp.CallToolResult, empty, error) {
-		path := "/desktops/" + input.Name + "?action=down"
-		if input.Shutdown {
-			path += "&shutdown=true"
-		}
+		path := "/desktops/" + input.Name + "?action=down&shutdown=true"
 		if input.Force {
 			path += "&force=true"
 		}

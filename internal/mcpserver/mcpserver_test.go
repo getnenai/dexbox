@@ -181,8 +181,7 @@ func TestStopDesktop(t *testing.T) {
 
 	srv := New(api.URL)
 	text := callTool(t, srv, "stop_desktop", map[string]any{
-		"name":     "win11",
-		"shutdown": true,
+		"name": "win11",
 	})
 
 	var resp map[string]any
