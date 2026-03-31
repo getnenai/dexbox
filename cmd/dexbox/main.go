@@ -29,6 +29,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/getnenai/dexbox/internal/config"
 	"github.com/getnenai/dexbox/internal/desktop"
@@ -595,8 +596,11 @@ func cmdCreate() *cobra.Command {
 }
 
 func cmdCreateVM() *cobra.Command {
-	var isoPath string
-	var fromVM string
+	var (
+		isoPath string
+		fromVM  string
+		user    string
+	)
 	c := &cobra.Command{
 		Use:   "vm <name>",
 		Short: "Create a new Windows VM (from ISO or by cloning)",
@@ -609,7 +613,8 @@ Exactly one of --iso or --from-desktop must be specified.
 
 Examples:
   dexbox create vm desktop-1 --iso ~/Downloads/Win11_25H2_English_x64.iso
-  dexbox create vm desktop-2 --from-desktop desktop-1`,
+  dexbox create vm desktop-2 --from-desktop desktop-1
+  dexbox create vm desktop-1 --iso ~/Downloads/Win11.iso --user myname`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
@@ -626,11 +631,28 @@ Examples:
 				home, _ := os.UserHomeDir()
 				expandedISO = home + isoPath[1:]
 			}
-			return vbox.Install(context.Background(), name, expandedISO)
+
+			// Prompt for password interactively; default to dexbox123 on
+			// empty input (or non-interactive stdin like pipes).
+			pass := "dexbox123"
+			if term.IsTerminal(int(syscall.Stdin)) {
+				fmt.Printf("Password for %q [dexbox123]: ", user)
+				raw, err := term.ReadPassword(int(syscall.Stdin))
+				fmt.Println() // newline after masked input
+				if err != nil {
+					return fmt.Errorf("read password: %w", err)
+				}
+				if len(raw) > 0 {
+					pass = string(raw)
+				}
+			}
+
+			return vbox.Install(context.Background(), name, expandedISO, user, pass)
 		},
 	}
 	c.Flags().StringVar(&isoPath, "iso", "", "Path to Windows ISO (for fresh install)")
 	c.Flags().StringVar(&fromVM, "from-desktop", "", "Source VM to clone (for instant creation)")
+	c.Flags().StringVar(&user, "user", "dexbox", "Guest OS username")
 	c.MarkFlagsMutuallyExclusive("iso", "from-desktop")
 	return c
 }

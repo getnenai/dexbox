@@ -103,9 +103,9 @@
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
             <AutoLogon>
                 <Enabled>true</Enabled>
-                <Username>dexbox</Username>
+                <Username>__VM_USER__</Username>
                 <Password>
-                    <Value>dexbox123</Value>
+                    <Value>__VM_PASS__</Value>
                     <PlainText>true</PlainText>
                 </Password>
                 <LogonCount>999</LogonCount>
@@ -123,10 +123,10 @@
             <UserAccounts>
                 <LocalAccounts>
                     <LocalAccount wcm:action="add">
-                        <Name>dexbox</Name>
+                        <Name>__VM_USER__</Name>
                         <Group>Administrators</Group>
                         <Password>
-                            <Value>dexbox123</Value>
+                            <Value>__VM_PASS__</Value>
                             <PlainText>true</PlainText>
                         </Password>
                     </LocalAccount>

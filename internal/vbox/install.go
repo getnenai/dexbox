@@ -30,7 +30,8 @@ const (
 // Install runs the full provisioning flow: install VirtualBox, validate ISO, create VM.
 // vmName is the name for the new VirtualBox VM.
 // isoPath is the path to a user-supplied Windows ISO.
-func Install(ctx context.Context, vmName, isoPath string) error {
+// user and pass are the guest OS account credentials baked into the unattended install.
+func Install(ctx context.Context, vmName, isoPath, user, pass string) error {
 	// Step 1: Check/install VirtualBox
 	if err := ensureVirtualBox(); err != nil {
 		return fmt.Errorf("VirtualBox installation: %w", err)
@@ -69,7 +70,7 @@ func Install(ctx context.Context, vmName, isoPath string) error {
 
 	// Step 4: Unattended install
 	fmt.Println("Configuring unattended Windows install...")
-	if err := unattendedInstall(ctx, vmName, isoPath); err != nil {
+	if err := unattendedInstall(ctx, vmName, isoPath, user, pass); err != nil {
 		return fmt.Errorf("unattended install: %w", err)
 	}
 
@@ -113,8 +114,8 @@ func Install(ctx context.Context, vmName, isoPath string) error {
 	fmt.Println("")
 	fmt.Println("Installation complete!")
 	fmt.Printf("  VM name:    %s\n", vmName)
-	fmt.Printf("  User:       dexbox\n")
-	fmt.Printf("  Password:   dexbox123\n")
+	fmt.Printf("  User:       %s\n", user)
+	fmt.Printf("  Password:   %s\n", pass)
 	fmt.Printf("  Shared dir: %s\n", sharedDir)
 	fmt.Println("")
 	fmt.Println("Next steps:")
@@ -328,7 +329,7 @@ func ensureVirtioISO(ctx context.Context) (string, error) {
 	return isoPath, nil
 }
 
-func unattendedInstall(ctx context.Context, vmName, isoPath string) error {
+func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) error {
 	// Build a small ISO containing autounattend.xml and attach it alongside the
 	// Windows ISO. Windows Setup scans all attached removable media for
 	// autounattend.xml, so this sidesteps the brittle "VBoxManage unattended
@@ -390,6 +391,8 @@ func unattendedInstall(ctx context.Context, vmName, isoPath string) error {
 		[]byte(`__IMAGE_INDEX__`),
 		[]byte(fmt.Sprintf("%d", maxCount)),
 	)
+	xmlData = bytes.ReplaceAll(xmlData, []byte(`__VM_USER__`), []byte(user))
+	xmlData = bytes.ReplaceAll(xmlData, []byte(`__VM_PASS__`), []byte(pass))
 	if err := os.WriteFile(filepath.Join(stageDir, "autounattend.xml"), xmlData, 0o644); err != nil {
 		return err
 	}
