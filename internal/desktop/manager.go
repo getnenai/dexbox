@@ -149,7 +149,9 @@ func (m *Manager) Down(ctx context.Context, name string, shutdown bool, force bo
 
 	if ok {
 		_ = d.Disconnect()
-		m.notify(name, SessionDown)
+		if d.Type() == "rdp" {
+			m.notify(name, SessionDown)
+		}
 	}
 
 	if !shutdown {
@@ -183,7 +185,9 @@ func (m *Manager) DownAll(ctx context.Context, force bool) error {
 	// Disconnect all sessions
 	for name, d := range sessions {
 		_ = d.Disconnect()
-		m.notify(name, SessionDown)
+		if d.Type() == "rdp" {
+			m.notify(name, SessionDown)
+		}
 	}
 
 	// Shutdown all running VMs
