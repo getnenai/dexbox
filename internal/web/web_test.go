@@ -62,7 +62,7 @@ func TestServeEvents_InitialConnected(t *testing.T) {
 
 	// Inject an active RDP session without dialing guacd. Disconnect() is a
 	// no-op when client is nil, so this is safe.
-	rdp := desktop.NewRDP("win", desktop.RDPConfig{Host: "localhost", Port: 3389}, "localhost:4822")
+	rdp := desktop.NewBringRDP("win", desktop.RDPConfig{Host: "localhost", Port: 3389}, "localhost:4822")
 	mgr.SetSession("win", rdp)
 
 	body := collectSSE(t, mgr, "win", 30*time.Millisecond)
@@ -77,7 +77,7 @@ func TestServeEvents_InitialConnected(t *testing.T) {
 // "agent_disconnected" event after the initial "agent_connected".
 func TestServeEvents_ReceivesSessionDown(t *testing.T) {
 	mgr := newTestManager(t)
-	rdp := desktop.NewRDP("win", desktop.RDPConfig{Host: "localhost", Port: 3389}, "localhost:4822")
+	rdp := desktop.NewBringRDP("win", desktop.RDPConfig{Host: "localhost", Port: 3389}, "localhost:4822")
 	mgr.SetSession("win", rdp)
 
 	h := web.Handler(mgr, "localhost:4822")

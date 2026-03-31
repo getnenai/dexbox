@@ -105,7 +105,7 @@ func (m *Manager) Up(ctx context.Context, name string) error {
 		return fmt.Errorf("guacd required for RDP: %w", err)
 	}
 
-	d := NewRDP(name, cfg, m.guacdAddr)
+	d := NewBringRDP(name, cfg, m.guacdAddr)
 	if err := d.Connect(ctx); err != nil {
 		return err
 	}
@@ -249,15 +249,15 @@ func (m *Manager) Subscribe(name string) (<-chan SessionEvent, func()) {
 	return ch, cancel
 }
 
-// ActiveRDP returns the active *RDP session for the named desktop, if any.
-func (m *Manager) ActiveRDP(name string) (*RDP, bool) {
+// ActiveRDP returns the active *BringRDP session for the named desktop, if any.
+func (m *Manager) ActiveRDP(name string) (*BringRDP, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	d, ok := m.sessions[name]
 	if !ok {
 		return nil, false
 	}
-	r, ok := d.(*RDP)
+	r, ok := d.(*BringRDP)
 	return r, ok
 }
 

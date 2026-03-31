@@ -257,7 +257,7 @@ func TestManagerActiveRDP_ReturnsRDP(t *testing.T) {
 	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
 	mgr := NewManager(nil, store, "localhost:4822")
 
-	rdp := NewRDP("win", RDPConfig{Host: "localhost", Port: 3389}, "localhost:4822")
+	rdp := NewBringRDP("win", RDPConfig{Host: "localhost", Port: 3389}, "localhost:4822")
 	mgr.SetSession("win", rdp)
 
 	got, ok := mgr.ActiveRDP("win")
