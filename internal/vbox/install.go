@@ -421,19 +421,34 @@ func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) 
 for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addstore TrustedPublisher %%d:\cert\vbox-sha256.cer`
 		gaExe = "VBoxWindowsAdditions-arm64.exe"
 	}
+	logLine := "echo [%%DATE%% %%TIME%%]"
 	setupScript := fmt.Sprintf("@echo off\r\n"+
-		"%s\r\n"+
-		"REM Wait for ARM drivers to finish initializing\r\n"+
-		"timeout /t 10 /nobreak\r\n"+
-		"for %%%%d in (D E F G H) do if exist %%%%d:\\%s %%%%d:\\%s /S\r\n"+
-		"REM === Create user and grant admin (runs before OOBE, user may not exist yet) ===\r\n"+
-		"net user dexbox dexbox123 /add 2>nul\r\n"+
-		"net localgroup Administrators dexbox /add\r\n"+
+		"set LOG=C:\\Windows\\Setup\\Scripts\\SetupComplete.log\r\n"+
+		"%[4]s SetupComplete.cmd starting >> %%LOG%%\r\n"+
+		"REM === Create user and grant admin FIRST (GA install may reboot) ===\r\n"+
+		"%[4]s Creating user >> %%LOG%%\r\n"+
+		"net user dexbox dexbox123 /add >> %%LOG%% 2>&1\r\n"+
+		"%[4]s Adding to Administrators >> %%LOG%%\r\n"+
+		"net localgroup Administrators dexbox /add >> %%LOG%% 2>&1\r\n"+
+		"REM === Security hardening ===\r\n"+
+		"%[4]s Disabling Defender >> %%LOG%%\r\n"+
 		"powershell -Command Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue\r\n"+
-		"netsh advfirewall firewall add rule name=dexbox-agent dir=in action=allow protocol=TCP localport=8600\r\n"+
+		"%[4]s Opening firewall port 8600 >> %%LOG%%\r\n"+
+		"netsh advfirewall firewall add rule name=dexbox-agent dir=in action=allow protocol=TCP localport=8600 >> %%LOG%% 2>&1\r\n"+
+		"%[4]s Setting execution policy >> %%LOG%%\r\n"+
 		"powershell -Command Set-ExecutionPolicy Bypass -Scope LocalMachine -Force\r\n"+
+		"%[4]s Hardening complete >> %%LOG%%\r\n"+
+		"REM === Guest Additions (may trigger reboot, must be last) ===\r\n"+
+		"%[4]s Installing certificates >> %%LOG%%\r\n"+
+		"%[1]s\r\n"+
+		"%[4]s Waiting for drivers >> %%LOG%%\r\n"+
+		"timeout /t 10 /nobreak\r\n"+
+		"%[4]s Launching GA installer >> %%LOG%%\r\n"+
+		"for %%d in (D E F G H) do if exist %%d:\\%[2]s %%d:\\%[2]s /S\r\n"+
+		"%[4]s Scheduling reboot >> %%LOG%%\r\n"+
 		"shutdown /r /t 30\r\n",
-		certTool, gaExe, gaExe)
+		certTool, gaExe, gaExe, logLine)
+	_ = logLine
 	if err := os.WriteFile(filepath.Join(stageDir, "SetupComplete.cmd"), []byte(setupScript), 0o644); err != nil {
 		return "", err
 	}
