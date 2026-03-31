@@ -15,7 +15,6 @@ import (
 	"github.com/wwt/guac"
 
 	"github.com/getnenai/dexbox/internal/desktop"
-	"github.com/getnenai/dexbox/internal/vbox"
 )
 
 //go:embed static/viewer.html
@@ -28,12 +27,12 @@ var staticFiles embed.FS
 //
 //	GET /desktops/<name>/view   — serves the HTML viewer
 //	GET /desktops/<name>/tunnel — wwt/guac WebSocket tunnel to guacd
-func Handler(store *desktop.ConnectionStore, vboxMgr *vbox.Manager, guacdAddr string) http.Handler {
+//	GET /desktops/<name>/events — SSE stream of agent session events
+func Handler(mgr *desktop.Manager, guacdAddr string) http.Handler {
 	mux := http.NewServeMux()
 
-	// View route — serves the static HTML
 	mux.HandleFunc("/desktops/", func(w http.ResponseWriter, r *http.Request) {
-		// Parse /desktops/<name>/view or /desktops/<name>/tunnel
+		// Parse /desktops/<name>/view, /desktops/<name>/tunnel, or /desktops/<name>/events
 		path := strings.TrimPrefix(r.URL.Path, "/desktops/")
 		parts := strings.SplitN(path, "/", 2)
 		if len(parts) < 2 {
@@ -48,7 +47,9 @@ func Handler(store *desktop.ConnectionStore, vboxMgr *vbox.Manager, guacdAddr st
 		case "view":
 			serveViewer(w, r)
 		case "tunnel":
-			serveTunnel(w, r, name, store, vboxMgr, guacdAddr)
+			serveTunnel(w, r, name, mgr, guacdAddr)
+		case "events":
+			serveEvents(w, r, name, mgr)
 		default:
 			http.NotFound(w, r)
 		}
@@ -68,33 +69,49 @@ func serveViewer(w http.ResponseWriter, r *http.Request) {
 	w.Write(viewerHTML)
 }
 
-func serveTunnel(w http.ResponseWriter, r *http.Request, name string, store *desktop.ConnectionStore, vboxMgr *vbox.Manager, guacdAddr string) {
-	cfg, ok := store.Get(name)
+func serveTunnel(w http.ResponseWriter, r *http.Request, name string, mgr *desktop.Manager, guacdAddr string) {
+	cfg, ok := mgr.RDPConfig(name)
 	if !ok {
 		http.Error(w, fmt.Sprintf("desktop %q is not an RDP connection; browser view requires RDP or VRDE-enabled VMs", name), http.StatusNotFound)
 		return
 	}
 
+	// If an agent RDP session is active, join it read-only by prepending "$"
+	// to the connection ID. This reuses the existing guacd↔RDP connection
+	// instead of opening a competing session (which would kick out the agent).
+	connectionID := ""
+	if rdp, active := mgr.ActiveRDP(name); active {
+		if id := rdp.GuacdConnectionID(); id != "" {
+			connectionID = "$" + id
+			log.Printf("[tunnel %s] joining existing agent session %s read-only", name, id)
+		}
+	}
+
 	// Build Guacamole configuration.
 	config := guac.NewGuacamoleConfiguration()
-	config.Protocol = "rdp"
-	security := cfg.Security
-	if security == "" {
-		security = "any"
+	if connectionID != "" {
+		// Joining an existing session: only the connection ID is needed.
+		config.ConnectionID = connectionID
+	} else {
+		config.Protocol = "rdp"
+		security := cfg.Security
+		if security == "" {
+			security = "any"
+		}
+		config.Parameters = map[string]string{
+			"hostname":         cfg.Host,
+			"port":             fmt.Sprintf("%d", cfg.Port),
+			"username":         cfg.Username,
+			"password":         cfg.Password,
+			"security":         security,
+			"ignore-cert":      fmt.Sprintf("%t", cfg.IgnoreCert),
+			"disable-audio":    "true",
+			"enable-wallpaper": "false",
+		}
+		config.OptimalScreenWidth = cfg.Width
+		config.OptimalScreenHeight = cfg.Height
+		config.ImageMimetypes = []string{"image/png", "image/jpeg"}
 	}
-	config.Parameters = map[string]string{
-		"hostname":         cfg.Host,
-		"port":             fmt.Sprintf("%d", cfg.Port),
-		"username":         cfg.Username,
-		"password":         cfg.Password,
-		"security":         security,
-		"ignore-cert":      fmt.Sprintf("%t", cfg.IgnoreCert),
-		"disable-audio":    "true",
-		"enable-wallpaper": "false",
-	}
-	config.OptimalScreenWidth = cfg.Width
-	config.OptimalScreenHeight = cfg.Height
-	config.ImageMimetypes = []string{"image/png", "image/jpeg"}
 
 	// Use the wwt/guac WebsocketServer for the WebSocket↔guacd proxy.
 	// It correctly parses Guacamole protocol instructions in both directions
@@ -134,4 +151,53 @@ func serveTunnel(w http.ResponseWriter, r *http.Request, name string, store *des
 	}
 
 	wsServer.ServeHTTP(w, r)
+}
+
+// serveEvents streams agent session events (agent_connected / agent_disconnected)
+// as Server-Sent Events. The browser viewer subscribes to know when to switch
+// between read-only (agent active) and interactive (agent gone) tunnel modes.
+func serveEvents(w http.ResponseWriter, r *http.Request, name string, mgr *desktop.Manager) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	ch, cancel := mgr.Subscribe(name)
+	defer cancel()
+
+	// Send the current state immediately so the browser can start in the
+	// right mode without waiting for the next transition.
+	if _, active := mgr.ActiveRDP(name); active {
+		fmt.Fprintf(w, "data: agent_connected\n\n")
+	} else {
+		fmt.Fprintf(w, "data: agent_disconnected\n\n")
+	}
+	flusher.Flush()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case evt, ok := <-ch:
+			if !ok {
+				return
+			}
+			var data string
+			switch evt.Type {
+			case desktop.SessionUp:
+				data = "agent_connected"
+			case desktop.SessionDown:
+				data = "agent_disconnected"
+			default:
+				continue
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
 }

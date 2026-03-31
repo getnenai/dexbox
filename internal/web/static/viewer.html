@@ -14,6 +14,7 @@
       border-radius: 4px; z-index: 10;
     }
     #status.connected { color: #4f4; }
+    #status.readonly { color: #fa0; }
     #status.error { color: #f44; }
   </style>
 </head>
@@ -38,84 +39,143 @@
 
       document.title = 'Dexbox — ' + desktopName;
 
-      // Build WebSocket URL for the tunnel endpoint
-      const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const tunnelUrl = wsProto + '//' + location.host + '/desktops/' + desktopName + '/tunnel';
-
-      const tunnel = new Guacamole.WebSocketTunnel(tunnelUrl);
-      const client = new Guacamole.Client(tunnel);
-
       const display = document.getElementById('display');
       const statusEl = document.getElementById('status');
 
-      // Add the Guacamole display element
-      display.appendChild(client.getDisplay().getElement());
+      // Build base URL parts
+      const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const tunnelUrl = wsProto + '//' + location.host + '/desktops/' + desktopName + '/tunnel';
+      const eventsUrl = '/desktops/' + desktopName + '/events';
 
-      // Connect (pass empty string to avoid ?undefined in tunnel URL)
-      client.connect('');
+      var currentClient = null;
+      var currentTunnel = null;
+      var isReadonly = false;
+      var keyboard = null; // created once; lives for the page lifetime
+      var reconnectTimer = null;
 
-      // State change handler
-      client.onstatechange = function(state) {
-        switch (state) {
-          case 0: statusEl.textContent = 'idle'; break;
-          case 1: statusEl.textContent = 'connecting...'; break;
-          case 2: statusEl.textContent = 'waiting...'; break;
-          case 3:
-            statusEl.textContent = 'connected';
-            statusEl.className = 'connected';
-            // Auto-hide after 2s
-            setTimeout(function() { statusEl.style.opacity = '0.3'; }, 2000);
-            break;
-          case 4:
-            statusEl.textContent = 'disconnecting...';
-            statusEl.className = '';
-            break;
-          case 5:
-            statusEl.textContent = 'disconnected';
-            statusEl.className = 'error';
-            break;
+      function connectTunnel(readonly) {
+        isReadonly = readonly;
+
+        if (currentClient) {
+          currentClient.disconnect();
+          currentClient = null;
+          currentTunnel = null;
+        }
+
+        currentTunnel = new Guacamole.WebSocketTunnel(tunnelUrl);
+        currentClient = new Guacamole.Client(currentTunnel);
+
+        // Replace the display element with the new client's display
+        display.innerHTML = '';
+        var guacEl = currentClient.getDisplay().getElement();
+        display.appendChild(guacEl);
+
+        // Connect (pass empty string to avoid ?undefined in tunnel URL)
+        currentClient.connect('');
+
+        currentClient.onstatechange = function(state) {
+          switch (state) {
+            case 0: statusEl.textContent = 'idle'; statusEl.className = ''; break;
+            case 1: statusEl.textContent = 'connecting...'; statusEl.className = ''; break;
+            case 2: statusEl.textContent = 'waiting...'; statusEl.className = ''; break;
+            case 3:
+              if (readonly) {
+                statusEl.textContent = 'watching (agent active)';
+                statusEl.className = 'readonly';
+              } else {
+                statusEl.textContent = 'connected';
+                statusEl.className = 'connected';
+                // Auto-hide after 2s
+                setTimeout(function() { statusEl.style.opacity = '0.3'; }, 2000);
+              }
+              break;
+            case 4:
+              statusEl.textContent = 'disconnecting...';
+              statusEl.className = '';
+              break;
+            case 5:
+              statusEl.textContent = 'disconnected';
+              statusEl.className = 'error';
+              break;
+          }
+        };
+
+        currentClient.onerror = function(error) {
+          statusEl.textContent = 'error: ' + (error.message || 'unknown');
+          statusEl.className = 'error';
+        };
+
+        if (!readonly) {
+          // Mouse and touch are per-display-element, so recreate them each time.
+          var mouse = new Guacamole.Mouse(guacEl);
+          mouse.onEach(['mousedown', 'mousemove', 'mouseup'], function(e) {
+            currentClient.sendMouseState(e.state);
+          });
+
+          var touch = new Guacamole.Mouse.Touchscreen(guacEl);
+          touch.onEach(['mousedown', 'mousemove', 'mouseup'], function(e) {
+            currentClient.sendMouseState(e.state);
+          });
+
+          // Keyboard is attached to document — create it once and update
+          // its handlers to point at the current client on each reconnect.
+          if (!keyboard) {
+            keyboard = new Guacamole.Keyboard(document);
+          }
+          keyboard.onkeydown = function(keysym) { currentClient.sendKeyEvent(1, keysym); };
+          keyboard.onkeyup  = function(keysym) { currentClient.sendKeyEvent(0, keysym); };
+        } else {
+          // Readonly: disable keyboard so keystrokes aren't forwarded.
+          if (keyboard) {
+            keyboard.onkeydown = null;
+            keyboard.onkeyup  = null;
+          }
+        }
+
+        // Handle resize
+        function resize() {
+          currentClient.sendSize(window.innerWidth, window.innerHeight);
+        }
+        window.addEventListener('resize', resize);
+      }
+
+      // Start in interactive mode; SSE will switch to read-only if agent is active.
+      connectTunnel(false);
+
+      // Subscribe to agent session events via SSE.
+      var evtSource = new EventSource(eventsUrl);
+
+      evtSource.onmessage = function(e) {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+
+        if (e.data === 'agent_connected') {
+          // Agent took over — join its guacd session read-only.
+          if (!isReadonly) {
+            connectTunnel(true);
+          }
+        } else if (e.data === 'agent_disconnected') {
+          // Agent disconnected — reconnect interactive within 3s so the
+          // browser viewer can take over without a noticeable gap.
+          if (isReadonly) {
+            reconnectTimer = setTimeout(function() {
+              reconnectTimer = null;
+              connectTunnel(false);
+            }, 3000);
+          }
         }
       };
 
-      client.onerror = function(error) {
-        statusEl.textContent = 'error: ' + (error.message || 'unknown');
-        statusEl.className = 'error';
+      evtSource.onerror = function() {
+        // SSE connection lost; the browser will retry automatically.
       };
-
-      // Mouse — attach to the Guacamole display element so coordinates
-      // are in remote display space (1024x768) directly.
-      var guacDisplay = client.getDisplay().getElement();
-      var mouse = new Guacamole.Mouse(guacDisplay);
-      mouse.onEach(['mousedown', 'mousemove', 'mouseup'], function(e) {
-        client.sendMouseState(e.state);
-      });
-
-      // Touch (for mobile/tablet)
-      var touch = new Guacamole.Mouse.Touchscreen(guacDisplay);
-      touch.onEach(['mousedown', 'mousemove', 'mouseup'], function(e) {
-        client.sendMouseState(e.state);
-      });
-
-      // Keyboard
-      const keyboard = new Guacamole.Keyboard(document);
-      keyboard.onkeydown = function(keysym) {
-        client.sendKeyEvent(1, keysym);
-      };
-      keyboard.onkeyup = function(keysym) {
-        client.sendKeyEvent(0, keysym);
-      };
-
-      // Handle resize
-      function resize() {
-        const w = window.innerWidth;
-        const h = window.innerHeight;
-        client.sendSize(w, h);
-      }
-      window.addEventListener('resize', resize);
 
       // Cleanup on page unload
       window.addEventListener('beforeunload', function() {
-        client.disconnect();
+        if (currentClient) currentClient.disconnect();
+        evtSource.close();
       });
     })();
   </script>

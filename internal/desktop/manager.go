@@ -11,6 +11,21 @@ import (
 	"github.com/getnenai/dexbox/internal/vbox"
 )
 
+// SessionEventType indicates whether an agent connected or disconnected.
+type SessionEventType int
+
+const (
+	SessionUp   SessionEventType = iota
+	SessionDown
+)
+
+// SessionEvent is sent on subscriber channels when an RDP agent for a named
+// desktop transitions between connected and disconnected.
+type SessionEvent struct {
+	Type SessionEventType
+	Name string
+}
+
 // DesktopStatus describes the state of any desktop (VM or RDP).
 type DesktopStatus struct {
 	Name      string `json:"name"`
@@ -27,6 +42,9 @@ type Manager struct {
 
 	sessions map[string]Desktop
 	mu       sync.Mutex
+
+	subs   map[string][]chan SessionEvent
+	subsMu sync.Mutex
 }
 
 // NewManager creates a unified desktop manager.
@@ -36,6 +54,7 @@ func NewManager(vboxMgr *vbox.Manager, store *ConnectionStore, guacdAddr string)
 		store:     store,
 		guacdAddr: guacdAddr,
 		sessions:  make(map[string]Desktop),
+		subs:      make(map[string][]chan SessionEvent),
 	}
 }
 
@@ -94,6 +113,7 @@ func (m *Manager) Up(ctx context.Context, name string) error {
 	// m.mu is already held (acquired at entry, released via defer).
 	// The VM path above stores its session the same way.
 	m.sessions[name] = d
+	m.notify(name, SessionUp)
 	return nil
 }
 
@@ -129,6 +149,7 @@ func (m *Manager) Down(ctx context.Context, name string, shutdown bool, force bo
 
 	if ok {
 		_ = d.Disconnect()
+		m.notify(name, SessionDown)
 	}
 
 	if !shutdown {
@@ -199,6 +220,59 @@ func (m *Manager) Get(name string) (Desktop, bool) {
 	defer m.mu.Unlock()
 	d, ok := m.sessions[name]
 	return d, ok
+}
+
+// Subscribe returns a channel that receives a SessionEvent whenever the named
+// desktop's agent session transitions up or down. The returned cancel function
+// must be called to release resources when the caller is done listening.
+func (m *Manager) Subscribe(name string) (<-chan SessionEvent, func()) {
+	ch := make(chan SessionEvent, 1)
+	m.subsMu.Lock()
+	m.subs[name] = append(m.subs[name], ch)
+	m.subsMu.Unlock()
+	cancel := func() {
+		m.subsMu.Lock()
+		defer m.subsMu.Unlock()
+		chans := m.subs[name]
+		for i, c := range chans {
+			if c == ch {
+				m.subs[name] = append(chans[:i], chans[i+1:]...)
+				return
+			}
+		}
+	}
+	return ch, cancel
+}
+
+// ActiveRDP returns the active *RDP session for the named desktop, if any.
+func (m *Manager) ActiveRDP(name string) (*RDP, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.sessions[name]
+	if !ok {
+		return nil, false
+	}
+	r, ok := d.(*RDP)
+	return r, ok
+}
+
+// RDPConfig returns the stored connection configuration for the named RDP desktop.
+func (m *Manager) RDPConfig(name string) (RDPConfig, bool) {
+	return m.store.Get(name)
+}
+
+// notify sends a SessionEvent to all subscribers for the named desktop.
+// It is non-blocking: a slow subscriber that has not drained its channel
+// will simply miss the event (the channel is capped at 1).
+func (m *Manager) notify(name string, t SessionEventType) {
+	m.subsMu.Lock()
+	defer m.subsMu.Unlock()
+	for _, ch := range m.subs[name] {
+		select {
+		case ch <- SessionEvent{Type: t, Name: name}:
+		default:
+		}
+	}
 }
 
 // Resolve returns an active, connected desktop for tool execution.

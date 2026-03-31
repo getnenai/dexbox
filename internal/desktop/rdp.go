@@ -20,7 +20,8 @@ type RDP struct {
 	config    RDPConfig
 	guacdAddr string
 
-	client *bring.Client
+	client bringClient
+	connID string // guacd connection ID from handshake; set after SessionActive
 	state  bring.SessionState
 	mu     sync.Mutex
 	done   chan struct{} // closed when client.Start() returns
@@ -91,6 +92,7 @@ func (r *RDP) Connect(ctx context.Context) error {
 			return fmt.Errorf("RDP session closed during connection")
 		case <-ticker.C:
 			if client.State() == bring.SessionActive {
+				r.connID = client.ConnectionID()
 				// Give the display a moment to receive the initial frame
 				time.Sleep(500 * time.Millisecond)
 				return nil
@@ -283,7 +285,15 @@ func (r *RDP) KeyPress(ctx context.Context, spec string) error {
 func (r *RDP) Name() string { return r.name }
 func (r *RDP) Type() string { return "rdp" }
 
-func (r *RDP) getClient() *bring.Client {
+// GuacdConnectionID returns the guacd connection ID assigned during handshake.
+// Returns an empty string if the session is not yet active.
+func (r *RDP) GuacdConnectionID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.connID
+}
+
+func (r *RDP) getClient() bringClient {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.client
