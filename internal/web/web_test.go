@@ -22,25 +22,18 @@ func newTestManager(t *testing.T) *desktop.Manager {
 	return desktop.NewManager(nil, store, "localhost:4822")
 }
 
-// collectSSE starts the SSE handler for the given desktop name, waits for
-// extraWait to allow in-flight events to arrive, then cancels the request
-// context and returns the accumulated body.
-func collectSSE(t *testing.T, mgr *desktop.Manager, name string, extraWait time.Duration) string {
+// collectSSE runs the SSE handler for the given desktop name until the context
+// deadline expires, then returns the accumulated body. Using a timeout context
+// avoids scheduler-sensitive sleeps: the initial state event is written
+// synchronously before the handler blocks, so any reasonable deadline suffices.
+func collectSSE(t *testing.T, mgr *desktop.Manager, name string, timeout time.Duration) string {
 	t.Helper()
 	h := web.Handler(mgr, "localhost:4822")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	req := httptest.NewRequest("GET", "/desktops/"+name+"/events", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
-
-	done := make(chan struct{})
-	go func() {
-		h.ServeHTTP(rec, req)
-		close(done)
-	}()
-
-	time.Sleep(extraWait)
-	cancel()
-	<-done
+	h.ServeHTTP(rec, req) // blocks until context times out
 	return rec.Body.String()
 }
 
@@ -48,7 +41,7 @@ func collectSSE(t *testing.T, mgr *desktop.Manager, name string, extraWait time.
 // "agent_disconnected" when no agent session is active.
 func TestServeEvents_InitialDisconnected(t *testing.T) {
 	mgr := newTestManager(t)
-	body := collectSSE(t, mgr, "win", 30*time.Millisecond)
+	body := collectSSE(t, mgr, "win", 100*time.Millisecond)
 
 	if !strings.Contains(body, "data: agent_disconnected") {
 		t.Errorf("expected initial agent_disconnected, got %q", body)
@@ -65,7 +58,7 @@ func TestServeEvents_InitialConnected(t *testing.T) {
 	rdp := desktop.NewBringRDP("win", desktop.RDPConfig{Host: "localhost", Port: 3389}, "localhost:4822")
 	mgr.SetSession("win", rdp)
 
-	body := collectSSE(t, mgr, "win", 30*time.Millisecond)
+	body := collectSSE(t, mgr, "win", 100*time.Millisecond)
 
 	if !strings.Contains(body, "data: agent_connected") {
 		t.Errorf("expected initial agent_connected, got %q", body)
@@ -86,22 +79,34 @@ func TestServeEvents_ReceivesSessionDown(t *testing.T) {
 	req := httptest.NewRequest("GET", "/desktops/win/events", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
-	done := make(chan struct{})
+	handlerDone := make(chan struct{})
 	go func() {
 		h.ServeHTTP(rec, req)
-		close(done)
+		close(handlerDone)
 	}()
 
-	// Let the handler subscribe and write the initial state.
-	time.Sleep(30 * time.Millisecond)
+	// Subscribe directly so we can wait for the SessionDown event via a
+	// channel instead of a second time.Sleep. serveEvents calls mgr.Subscribe
+	// as its very first action, so a brief yield is enough to ensure the
+	// handler's subscription is registered before we call Down().
+	evts, unsub := mgr.Subscribe("win")
+	defer unsub()
+	time.Sleep(10 * time.Millisecond) // let handler goroutine reach its Subscribe call
 
-	// Disconnect the agent, which fires SessionDown → "agent_disconnected".
-	_ = mgr.Down(context.Background(), "win", false, false)
+	if err := mgr.Down(context.Background(), "win", false, false); err != nil {
+		t.Fatalf("Down failed: %v", err)
+	}
 
-	// Let the SSE write propagate.
-	time.Sleep(30 * time.Millisecond)
+	// Wait for SessionDown on our channel; both subscriptions were registered
+	// before Down() fired, so the handler has also received the event.
+	select {
+	case <-evts:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for SessionDown event")
+	}
+
 	cancel()
-	<-done
+	<-handlerDone
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "data: agent_connected") {

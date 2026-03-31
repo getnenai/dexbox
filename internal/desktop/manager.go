@@ -242,6 +242,7 @@ func (m *Manager) Subscribe(name string) (<-chan SessionEvent, func()) {
 		for i, c := range chans {
 			if c == ch {
 				m.subs[name] = append(chans[:i], chans[i+1:]...)
+				close(ch) // signal consumers that no more events will arrive
 				return
 			}
 		}

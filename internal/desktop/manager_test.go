@@ -183,21 +183,23 @@ func TestManagerNotify_SendsToAllSubscribers(t *testing.T) {
 }
 
 // TestManagerSubscribe_CancelRemovesSubscriber verifies that calling the
-// cancel function stops future events from being delivered.
+// cancel function closes the channel and stops future events from being
+// delivered.
 func TestManagerSubscribe_CancelRemovesSubscriber(t *testing.T) {
 	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
 	mgr := NewManager(nil, store, "localhost:4822")
 
 	ch, cancel := mgr.Subscribe("win")
-	cancel() // unsubscribe before any event
+	cancel() // unsubscribe and close channel before any event
 
-	mgr.notify("win", SessionDown)
-
+	// The channel must be closed: a receive should return ok==false immediately.
 	select {
-	case evt := <-ch:
-		t.Errorf("expected no event after cancel, got %+v", evt)
+	case evt, ok := <-ch:
+		if ok {
+			t.Errorf("expected channel closed after cancel, got real event %+v", evt)
+		}
 	case <-time.After(50 * time.Millisecond):
-		// expected — channel should not receive anything
+		t.Error("channel was not closed after cancel")
 	}
 }
 
