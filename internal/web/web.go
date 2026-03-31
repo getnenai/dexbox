@@ -76,13 +76,14 @@ func serveTunnel(w http.ResponseWriter, r *http.Request, name string, mgr *deskt
 		return
 	}
 
-	// If an agent RDP session is active, join it read-only by prepending "$"
-	// to the connection ID. This reuses the existing guacd↔RDP connection
-	// instead of opening a competing session (which would kick out the agent).
+	// If an agent RDP session is active, join it read-only. Guacd connection
+	// IDs already carry the $ prefix (e.g. $abc-123); passing it as-is in
+	// config.ConnectionID tells guacd to join the existing session instead of
+	// opening a new one that would kick the agent out.
 	connectionID := ""
 	if rdp, active := mgr.ActiveRDP(name); active {
 		if id := rdp.GuacdConnectionID(); id != "" {
-			connectionID = "$" + id
+			connectionID = id
 			log.Printf("[tunnel %s] joining existing agent session %s read-only", name, id)
 		}
 	}
