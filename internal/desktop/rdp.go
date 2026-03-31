@@ -61,19 +61,13 @@ func NewBringRDP(name string, cfg RDPConfig, guacdAddr string) *BringRDP {
 	}
 }
 
-func (r *BringRDP) Connect(ctx context.Context) (retErr error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.client != nil {
-		return nil
-	}
-
+// buildGuacParams constructs the guacd parameter map from the RDP config.
+func (r *BringRDP) buildGuacParams() map[string]string {
 	security := r.config.Security
 	if security == "" {
 		security = "any"
 	}
-	guacConfig := map[string]string{
+	params := map[string]string{
 		"hostname":         r.config.Host,
 		"port":             fmt.Sprintf("%d", r.config.Port),
 		"username":         r.config.Username,
@@ -85,8 +79,24 @@ func (r *BringRDP) Connect(ctx context.Context) (retErr error) {
 		"enable-wallpaper": "false",
 	}
 	if r.config.IgnoreCert {
-		guacConfig["ignore-cert"] = "true"
+		params["ignore-cert"] = "true"
 	}
+	if r.config.DriveEnabled {
+		params["drive-name"] = r.config.DriveName
+		params["drive-path"] = "/guacd-shared"
+	}
+	return params
+}
+
+func (r *BringRDP) Connect(ctx context.Context) (retErr error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.client != nil {
+		return nil
+	}
+
+	guacConfig := r.buildGuacParams()
 
 	client, err := bring.NewClient(r.guacdAddr, "rdp", guacConfig, &bring.DefaultLogger{Quiet: true})
 	if err != nil {
