@@ -426,7 +426,8 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 		"REM Wait for ARM drivers to finish initializing\r\n"+
 		"timeout /t 10 /nobreak\r\n"+
 		"for %%%%d in (D E F G H) do if exist %%%%d:\\%s %%%%d:\\%s /S\r\n"+
-		"REM === Security hardening for agent operations ===\r\n"+
+		"REM === Create user and grant admin (runs before OOBE, user may not exist yet) ===\r\n"+
+		"net user dexbox dexbox123 /add 2>nul\r\n"+
 		"net localgroup Administrators dexbox /add\r\n"+
 		"powershell -Command Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue\r\n"+
 		"netsh advfirewall firewall add rule name=dexbox-agent dir=in action=allow protocol=TCP localport=8600\r\n"+
