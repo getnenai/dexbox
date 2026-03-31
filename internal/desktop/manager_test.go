@@ -157,13 +157,6 @@ func TestManagerUp_RDPMutexRelease(t *testing.T) {
 	}
 }
 
-// TestManagerUp_RDPDeadlock verifies that Manager.Up() for an RDP desktop
-// does not deadlock when the RDP connection succeeds.
-//
-// Before the fix, the RDP success path in Up() called m.mu.Lock() while
-// the mutex was already held via defer, causing a deadlock. The test uses
-// a context with a deadline so that a deadlock manifests as a timeout
-// rather than hanging the test runner forever.
 // TestManagerNotify_SendsToAllSubscribers verifies that notify delivers a
 // SessionEvent to every subscriber registered for that desktop name.
 func TestManagerNotify_SendsToAllSubscribers(t *testing.T) {
@@ -327,6 +320,13 @@ func TestManagerRDPConfig_NotFound(t *testing.T) {
 	}
 }
 
+// TestManagerUp_RDPDeadlock verifies that Manager.Up() for an RDP desktop
+// does not deadlock when the RDP connection succeeds.
+//
+// Before the fix, the RDP success path in Up() called m.mu.Lock() while
+// the mutex was already held via defer, causing a deadlock. The test uses
+// a context with a deadline so that a deadlock manifests as a timeout
+// rather than hanging the test runner forever.
 func TestManagerUp_RDPDeadlock(t *testing.T) {
 	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
 	store.Add("test-rdp", RDPConfig{
