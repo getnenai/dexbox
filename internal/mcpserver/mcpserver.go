@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -55,8 +57,11 @@ func errorResult(msg string) *mcp.CallToolResult {
 	}
 }
 
+// httpClient is used for all outbound requests to the Dexbox server.
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
 // doRequest performs an HTTP request against the Dexbox server and returns
-// the response body as a string.
+// the response body as a string. Non-2xx status codes are treated as errors.
 func doRequest(ctx context.Context, baseURL, method, path string, body any) (string, error) {
 	var reqBody io.Reader
 	if body != nil {
@@ -75,7 +80,7 @@ func doRequest(ctx context.Context, baseURL, method, path string, body any) (str
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("dexbox server unreachable at %s (is 'dexbox start' running?): %w", baseURL, err)
 	}
@@ -84,6 +89,10 @@ func doRequest(ctx context.Context, baseURL, method, path string, body any) (str
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("dexbox API error (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
 
 	return string(respBody), nil
@@ -109,7 +118,7 @@ func New(baseURL string) *mcp.Server {
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input listDesktopsInput) (*mcp.CallToolResult, empty, error) {
 		path := "/desktops"
 		if input.Type != "" {
-			path += "?type=" + input.Type
+			path += "?type=" + url.QueryEscape(input.Type)
 		}
 		body, err := doRequest(ctx, baseURL, http.MethodGet, path, nil)
 		if err != nil {
@@ -135,7 +144,7 @@ func New(baseURL string) *mcp.Server {
 		Name:        "destroy_desktop",
 		Description: "Destroy a desktop (delete VM or unregister RDP connection).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input desktopNameInput) (*mcp.CallToolResult, empty, error) {
-		body, err := doRequest(ctx, baseURL, http.MethodDelete, "/desktops/"+input.Name, nil)
+		body, err := doRequest(ctx, baseURL, http.MethodDelete, "/desktops/"+url.PathEscape(input.Name), nil)
 		if err != nil {
 			return errorResult(err.Error()), empty{}, nil
 		}
@@ -147,7 +156,7 @@ func New(baseURL string) *mcp.Server {
 		Name:        "start_desktop",
 		Description: "Bring a desktop online (boot VM or connect RDP session).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input desktopNameInput) (*mcp.CallToolResult, empty, error) {
-		body, err := doRequest(ctx, baseURL, http.MethodPost, "/desktops/"+input.Name+"?action=up", nil)
+		body, err := doRequest(ctx, baseURL, http.MethodPost, "/desktops/"+url.PathEscape(input.Name)+"?action=up", nil)
 		if err != nil {
 			return errorResult(err.Error()), empty{}, nil
 		}
@@ -159,10 +168,11 @@ func New(baseURL string) *mcp.Server {
 		Name:        "stop_desktop",
 		Description: "Disconnect a desktop session and shut down the VM guest OS.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input stopDesktopInput) (*mcp.CallToolResult, empty, error) {
-		path := "/desktops/" + input.Name + "?action=down&shutdown=true"
+		qs := url.Values{"action": {"down"}, "shutdown": {"true"}}
 		if input.Force {
-			path += "&force=true"
+			qs.Set("force", "true")
 		}
+		path := "/desktops/" + url.PathEscape(input.Name) + "?" + qs.Encode()
 		body, err := doRequest(ctx, baseURL, http.MethodPost, path, nil)
 		if err != nil {
 			return errorResult(err.Error()), empty{}, nil
@@ -175,7 +185,7 @@ func New(baseURL string) *mcp.Server {
 		Name:        "get_desktop",
 		Description: "Get the current status of a single desktop.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input desktopNameInput) (*mcp.CallToolResult, empty, error) {
-		body, err := doRequest(ctx, baseURL, http.MethodGet, "/desktops/"+input.Name, nil)
+		body, err := doRequest(ctx, baseURL, http.MethodGet, "/desktops/"+url.PathEscape(input.Name), nil)
 		if err != nil {
 			return errorResult(err.Error()), empty{}, nil
 		}

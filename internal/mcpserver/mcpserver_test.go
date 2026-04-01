@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -212,6 +213,45 @@ func TestGetDesktop(t *testing.T) {
 	}
 	if resp["state"] != "running" {
 		t.Errorf("expected state 'running', got %v", resp["state"])
+	}
+}
+
+func TestHTTPErrorPropagation(t *testing.T) {
+	// API that always returns 404
+	errAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{"error": "not_found", "message": "desktop does not exist"})
+	}))
+	defer errAPI.Close()
+
+	srv := New(errAPI.URL)
+
+	ctx := context.Background()
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	go srv.Run(ctx, serverTransport)
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "get_desktop",
+		Arguments: map[string]any{"name": "nonexistent"},
+	})
+	if err != nil {
+		t.Fatalf("call get_desktop: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected IsError to be true for a 404 response")
+	}
+	tc, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(tc.Text, "404") {
+		t.Errorf("expected error text to mention 404, got: %s", tc.Text)
 	}
 }
 

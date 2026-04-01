@@ -171,7 +171,7 @@ claude mcp add dexbox -- dexbox mcp
 | `create_desktop` | Register a new RDP connection |
 | `destroy_desktop` | Delete a VM or unregister RDP |
 | `start_desktop` | Boot VM or connect RDP session |
-| `stop_desktop` | Disconnect / shutdown a desktop |
+| `stop_desktop` | Shut down VM guest OS or disconnect RDP session |
 | `get_desktop` | Get single desktop status |
 
 ## How It Works
