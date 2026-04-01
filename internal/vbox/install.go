@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 //go:embed autounattend.xml
@@ -115,7 +116,7 @@ func Install(ctx context.Context, vmName, isoPath, user, pass string) error {
 	fmt.Println("Installation complete!")
 	fmt.Printf("  VM name:    %s\n", vmName)
 	fmt.Printf("  User:       %s\n", user)
-	fmt.Printf("  Password:   %s\n", pass)
+	fmt.Printf("  Password:   %s\n", strings.Repeat("*", utf8.RuneCountInString(pass)))
 	fmt.Printf("  Shared dir: %s\n", sharedDir)
 	fmt.Println("")
 	fmt.Println("Next steps:")
@@ -391,8 +392,8 @@ func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) 
 		[]byte(`__IMAGE_INDEX__`),
 		[]byte(fmt.Sprintf("%d", maxCount)),
 	)
-	xmlData = bytes.ReplaceAll(xmlData, []byte(`__VM_USER__`), []byte(user))
-	xmlData = bytes.ReplaceAll(xmlData, []byte(`__VM_PASS__`), []byte(pass))
+	xmlData = bytes.ReplaceAll(xmlData, []byte(`__VM_USER__`), []byte(xmlEscape(user)))
+	xmlData = bytes.ReplaceAll(xmlData, []byte(`__VM_PASS__`), []byte(xmlEscape(pass)))
 	if err := os.WriteFile(filepath.Join(stageDir, "autounattend.xml"), xmlData, 0o644); err != nil {
 		return err
 	}
