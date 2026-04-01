@@ -7,13 +7,22 @@ import { createInterface } from "readline";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 config({ path: resolve(__dirname, "..", "..", ".env") });
 import { runClaude } from "./runners/claude.js";
+import { runFireworks } from "./runners/fireworks.js";
 import { runLux } from "./runners/lux.js";
 
 const LUX_MODELS = ["lux-actor-1", "lux-thinker-1"] as const;
 type LuxModel = (typeof LUX_MODELS)[number];
 
+const FIREWORKS_MODELS: Record<string, string> = {
+  "kimi-k2p5": "accounts/fireworks/models/kimi-k2p5",
+};
+
 function isLuxModel(m: string): m is LuxModel {
   return LUX_MODELS.includes(m as LuxModel);
+}
+
+function isFireworksModel(m: string): boolean {
+  return m in FIREWORKS_MODELS;
 }
 
 function parseArgs(): { model: string; prompt: string } {
@@ -39,6 +48,8 @@ async function runPrompt(model: string, prompt: string): Promise<void> {
   let result: string;
   if (model === "claude") {
     result = await runClaude(prompt);
+  } else if (isFireworksModel(model)) {
+    result = await runFireworks(prompt, FIREWORKS_MODELS[model]);
   } else {
     result = await runLux(prompt, model as LuxModel);
   }
@@ -51,9 +62,9 @@ async function main() {
   const { model, prompt } = parseArgs();
 
   // Validate model
-  if (model !== "claude" && !isLuxModel(model)) {
+  if (model !== "claude" && !isLuxModel(model) && !isFireworksModel(model)) {
     console.error(
-      `Unknown model: ${model}. Use: claude, ${LUX_MODELS.join(", ")}`
+      `Unknown model: ${model}. Use: claude, ${Object.keys(FIREWORKS_MODELS).join(", ")}, ${LUX_MODELS.join(", ")}`
     );
     process.exit(1);
   }
@@ -63,6 +74,10 @@ async function main() {
     console.error(
       "ANTHROPIC_API_KEY is not set. Create a .env file from .env.example."
     );
+    process.exit(1);
+  }
+  if (isFireworksModel(model) && !process.env.FIREWORKS_API_KEY) {
+    console.error("FIREWORKS_API_KEY is not set. Add it to your .env file.");
     process.exit(1);
   }
   if (isLuxModel(model) && !process.env.OAGI_API_KEY) {
