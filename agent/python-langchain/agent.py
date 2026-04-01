@@ -77,10 +77,15 @@ def main():
     if DEXBOX_PROVIDER == "fireworks":
         from langchain_openai import ChatOpenAI
 
+        fireworks_key = os.environ.get("FIREWORKS_API_KEY")
+        if not fireworks_key:
+            print("ERROR: FIREWORKS_API_KEY is not set. Add it to your .env file.")
+            sys.exit(1)
+
         model = ChatOpenAI(
             model=DEXBOX_MODEL,
             base_url="https://api.fireworks.ai/inference/v1",
-            api_key=os.environ.get("FIREWORKS_API_KEY", ""),
+            api_key=fireworks_key,
             max_tokens=4096,
         )
     else:
