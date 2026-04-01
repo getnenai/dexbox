@@ -82,7 +82,11 @@ func (r *BringRDP) buildGuacParams() map[string]string {
 		params["ignore-cert"] = "true"
 	}
 	if r.config.DriveEnabled {
-		params["drive-name"] = r.config.DriveName
+		driveName := strings.TrimSpace(r.config.DriveName)
+		if driveName == "" {
+			driveName = "guac-drive"
+		}
+		params["drive-name"] = driveName
 		params["drive-path"] = "/guacd-shared"
 	}
 	return params

@@ -267,6 +267,22 @@ func TestRDP_buildGuacParams(t *testing.T) {
 			},
 		},
 		{
+			name: "DriveEnabled with empty DriveName defaults to guac-drive",
+			cfg:  withDrive(base, ""),
+			wantPresent: map[string]string{
+				"drive-name": "guac-drive",
+				"drive-path": "/guacd-shared",
+			},
+		},
+		{
+			name: "DriveEnabled with whitespace-only DriveName defaults to guac-drive",
+			cfg:  withDrive(base, "   "),
+			wantPresent: map[string]string{
+				"drive-name": "guac-drive",
+				"drive-path": "/guacd-shared",
+			},
+		},
+		{
 			name: "DriveDisabled omits drive params",
 			cfg:  base,
 			wantAbsent: []string{"drive-name", "drive-path"},
