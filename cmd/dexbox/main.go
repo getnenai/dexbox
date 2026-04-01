@@ -93,30 +93,47 @@ func cmdStart() *cobra.Command {
 		Short: "Start dexbox server, vboxwebsrv, and guacd",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			port := parseSoapPort()
+			ctx := context.Background()
 
-			// Run vboxwebsrv as a foreground child so Go owns the real PID
-			// and can kill it reliably on shutdown.
-			fmt.Println("Starting vboxwebsrv...")
-			vboxwebsrv := exec.Command("vboxwebsrv", "--host", "localhost", "--port", port)
-			vboxwebsrv.Stdout = os.Stdout
-			vboxwebsrv.Stderr = os.Stderr
-			if err := vboxwebsrv.Start(); err != nil {
-				return fmt.Errorf("failed to start vboxwebsrv: %w", err)
-			}
+			// vboxwebsrv is optional — skip gracefully when VirtualBox is not
+			// installed (e.g. QEMU-only environments).
+			var vboxwebsrv *exec.Cmd
+			vboxDied := make(chan error, 1)
+			stopVBox := func() {}
 
-			// Poll until vboxwebsrv is actually listening.
-			if err := waitForPort(port, 10*time.Second); err != nil {
-				_ = vboxwebsrv.Process.Kill()
-				return fmt.Errorf("vboxwebsrv failed to start: %w", err)
+			if _, err := exec.LookPath("vboxwebsrv"); err == nil {
+				fmt.Println("Starting vboxwebsrv...")
+				vboxwebsrv = exec.Command("vboxwebsrv", "--host", "localhost", "--port", port)
+				vboxwebsrv.Stdout = os.Stdout
+				vboxwebsrv.Stderr = os.Stderr
+				if err := vboxwebsrv.Start(); err != nil {
+					return fmt.Errorf("failed to start vboxwebsrv: %w", err)
+				}
+				if err := waitForPort(port, 10*time.Second); err != nil {
+					_ = vboxwebsrv.Process.Kill()
+					return fmt.Errorf("vboxwebsrv failed to start: %w", err)
+				}
+				go func() { vboxDied <- vboxwebsrv.Wait() }()
+				stopVBox = func() {
+					_ = vboxwebsrv.Process.Signal(syscall.SIGTERM)
+					select {
+					case <-vboxDied:
+					case <-time.After(5 * time.Second):
+						_ = vboxwebsrv.Process.Kill()
+					}
+				}
+			} else {
+				fmt.Println("vboxwebsrv not found — skipping (VirtualBox VMs disabled, RDP still available)")
+				// Keep vboxDied permanently open so the select below never fires on it.
+				// We never send on it, so it blocks forever.
 			}
 
 			// Start guacd (Docker) for RDP support
-			ctx := context.Background()
 			if guacd.DockerAvailable(ctx) {
 				fmt.Println("Starting guacd...")
 				if err := guacd.Start(ctx, config.SharedDir); err != nil {
 					fmt.Printf("Warning: failed to start guacd: %v\n", err)
-					fmt.Println("RDP connections will not be available. VMs still work.")
+					fmt.Println("RDP connections will not be available.")
 				} else {
 					fmt.Println("guacd running on port 4822")
 				}
@@ -135,30 +152,11 @@ func cmdStart() *cobra.Command {
 				SharedDir:  config.SharedDir,
 			})
 
-			// Handle shutdown signals
 			sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 
 			errCh := make(chan error, 1)
-			go func() {
-				errCh <- srv.Run()
-			}()
-
-			// Detect if vboxwebsrv dies while we're running.
-			vboxDied := make(chan error, 1)
-			go func() {
-				vboxDied <- vboxwebsrv.Wait()
-			}()
-
-			// Helper to shut down vboxwebsrv gracefully with a timeout.
-			stopVBox := func() {
-				_ = vboxwebsrv.Process.Signal(syscall.SIGTERM)
-				select {
-				case <-vboxDied:
-				case <-time.After(5 * time.Second):
-					_ = vboxwebsrv.Process.Kill()
-				}
-			}
+			go func() { errCh <- srv.Run() }()
 
 			select {
 			case err := <-errCh:
