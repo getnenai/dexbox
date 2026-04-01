@@ -283,9 +283,17 @@ func TestRDP_buildGuacParams(t *testing.T) {
 			},
 		},
 		{
-			name: "DriveDisabled omits drive params",
-			cfg:  base,
+			name:       "DriveDisabled omits drive params",
+			cfg:        func() RDPConfig { c := base; c.DriveEnabled = false; return c }(),
 			wantAbsent: []string{"drive-name", "drive-path"},
+		},
+		{
+			name: "DriveName trimmed of surrounding whitespace",
+			cfg:  withDrive(base, "  SharedDrive  "),
+			wantPresent: map[string]string{
+				"drive-name": "SharedDrive",
+				"drive-path": "/guacd-shared",
+			},
 		},
 		{
 			name: "DriveEnabled preserves other params",
