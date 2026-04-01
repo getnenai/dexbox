@@ -2,7 +2,9 @@ package desktop
 
 import (
 	"context"
+	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -372,6 +374,81 @@ func TestManagerUp_RDPDeadlock(t *testing.T) {
 		}
 		if d.Type() != "rdp" {
 			t.Errorf("expected rdp, got %s", d.Type())
+		}
+	}
+}
+
+// TestNewManager_SharedDirStored verifies that the sharedDir value passed to
+// NewManager is stored and accessible on the Manager instance.
+func TestNewManager_SharedDirStored(t *testing.T) {
+	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
+	const want = "/srv/dexbox-shared"
+	mgr := NewManager(nil, store, "localhost:4822", want)
+	if mgr.sharedDir != want {
+		t.Errorf("sharedDir = %q, want %q", mgr.sharedDir, want)
+	}
+}
+
+// TestManagerUp_RDP_DriveEnabled_GuacdListening verifies the full Up path for
+// an RDP connection with drive redirection enabled when guacd is already
+// listening. The guacd step should succeed immediately (IsListening returns
+// true) and the error should come from the unreachable RDP host, not from
+// guacd setup.
+//
+// This exercises the sharedDir wiring end-to-end: Manager stores the dir,
+// passes it to guacd.EnsureRunning on Up, which returns nil because a
+// listener is present on the guacd port.
+func TestManagerUp_RDP_DriveEnabled_GuacdListening(t *testing.T) {
+	// Start a local TCP listener to simulate guacd already being up.
+	l, err := net.Listen("tcp", "localhost:4822")
+	if err != nil {
+		t.Skipf("cannot bind localhost:4822 (port in use?): %v", err)
+	}
+	defer l.Close()
+
+	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
+	_ = store.Add("rdp-drive", RDPConfig{
+		Host:         "127.0.0.1",
+		Port:         19999, // unreachable — nothing listening here
+		Username:     "user",
+		Password:     "pass",
+		Width:        1024,
+		Height:       768,
+		DriveEnabled: true,
+		DriveName:    "MyDrive",
+	})
+	mgr := NewManager(nil, store, "localhost:4822", "/tmp/dexbox-shared")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errc := make(chan error, 1)
+	go func() { errc <- mgr.Up(ctx, "rdp-drive") }()
+
+	var upErr error
+	select {
+	case upErr = <-errc:
+	case <-ctx.Done():
+		t.Fatal("Manager.Up() timed out — possible deadlock")
+	}
+
+	// The guacd step should have succeeded; if there's an error it must come
+	// from the RDP connect attempt (e.g. guacd handshake with a dummy
+	// listener), NOT from guacd setup. nil is also acceptable here — the
+	// bring library may treat any accepting TCP connection on the guacd port
+	// as a valid session.
+	if upErr != nil && strings.Contains(upErr.Error(), "guacd required") {
+		t.Errorf("got guacd error when guacd is already listening: %v", upErr)
+	}
+	if upErr == nil {
+		// Connection succeeded against our test listener; verify the session
+		// was stored in the Manager.
+		d, ok := mgr.Get("rdp-drive")
+		if !ok {
+			t.Fatal("Up() succeeded but session not stored in manager")
+		}
+		if d.Type() != "rdp" {
+			t.Errorf("expected type rdp, got %s", d.Type())
 		}
 	}
 }
