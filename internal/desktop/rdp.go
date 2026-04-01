@@ -61,7 +61,7 @@ func NewBringRDP(name string, cfg RDPConfig, guacdAddr string) *BringRDP {
 	}
 }
 
-func (r *BringRDP) Connect(ctx context.Context) error {
+func (r *BringRDP) Connect(ctx context.Context) (retErr error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -102,6 +102,20 @@ func (r *BringRDP) Connect(ctx context.Context) error {
 		client.Start()
 	}()
 
+	// On any error return, stop the client and reset all state so that a
+	// subsequent Connect() call can start fresh rather than seeing a
+	// non-nil r.client from a broken session.
+	defer func() {
+		if retErr != nil {
+			client.Stop()
+			<-r.done // wait for Start() goroutine to exit
+			r.client = nil
+			r.connID = ""
+			r.live = false
+			r.done = nil
+		}
+	}()
+
 	// Wait for the session to become active
 	deadline := time.After(15 * time.Second)
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -135,11 +149,14 @@ func (r *BringRDP) Disconnect() error {
 		return nil
 	}
 
-	// The bring client doesn't expose a Close/Disconnect method.
-	// Setting client to nil and letting the GC clean up is the best we can do.
-	// The underlying TCP connection will be closed when the client is GC'd.
+	r.client.Stop()
+	if r.done != nil {
+		<-r.done // wait for Start() goroutine to exit
+		r.done = nil
+	}
 	r.client = nil
 	r.live = false
+	r.connID = ""
 	return nil
 }
 
