@@ -28,6 +28,28 @@ func mockDexboxAPI(t *testing.T) *httptest.Server {
 				},
 			})
 
+		// POST /actions (action tools)
+		case r.Method == http.MethodPost && r.URL.Path == "/actions":
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			toolType, _ := body["type"].(string)
+			action, _ := body["action"].(string)
+			desktop := r.URL.Query().Get("desktop")
+
+			switch {
+			case toolType == "computer_20250124" && action == "screenshot":
+				if r.Header.Get("Accept") == "image/png" {
+					w.Header().Set("Content-Type", "image/png")
+					w.Write([]byte("FAKEPNG"))
+					return
+				}
+				json.NewEncoder(w).Encode(map[string]any{"base64_image": "AAAA"})
+			case toolType == "bash_20250124":
+				json.NewEncoder(w).Encode(map[string]any{"output": "command output here", "desktop": desktop})
+			default:
+				json.NewEncoder(w).Encode(map[string]any{"status": "ok", "desktop": desktop})
+			}
+
 		// POST /desktops (create)
 		case r.Method == http.MethodPost && r.URL.Path == "/desktops":
 			var body map[string]any
@@ -263,5 +285,180 @@ func TestServerUnreachable(t *testing.T) {
 	// Should get an error result, not a test crash
 	if text == "" {
 		t.Fatal("expected error message, got empty string")
+	}
+}
+
+// callToolResult invokes an MCP tool and returns the raw CallToolResult.
+func callToolResult(t *testing.T, srv *mcp.Server, name string, args map[string]any) *mcp.CallToolResult {
+	t.Helper()
+	ctx := context.Background()
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	go srv.Run(ctx, serverTransport)
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      name,
+		Arguments: args,
+	})
+	if err != nil {
+		t.Fatalf("call %s: %v", name, err)
+	}
+	if len(result.Content) == 0 {
+		t.Fatalf("call %s: no content returned", name)
+	}
+	return result
+}
+
+func TestScreenshot(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	result := callToolResult(t, srv, "screenshot", nil)
+
+	img, ok := result.Content[0].(*mcp.ImageContent)
+	if !ok {
+		t.Fatalf("expected ImageContent, got %T", result.Content[0])
+	}
+	if img.MIMEType != "image/png" {
+		t.Errorf("expected image/png, got %s", img.MIMEType)
+	}
+	if len(img.Data) == 0 {
+		t.Error("expected non-empty image data")
+	}
+}
+
+func TestClick(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	text := callTool(t, srv, "click", map[string]any{
+		"x": 100, "y": 200,
+	})
+
+	if !strings.Contains(text, "clicked") {
+		t.Errorf("expected 'clicked' in result, got: %s", text)
+	}
+}
+
+func TestClickRightButton(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	text := callTool(t, srv, "click", map[string]any{
+		"x": 100, "y": 200, "button": "right",
+	})
+
+	if !strings.Contains(text, "clicked") {
+		t.Errorf("expected 'clicked' in result, got: %s", text)
+	}
+}
+
+func TestTypeText(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	text := callTool(t, srv, "type_text", map[string]any{
+		"text": "hello world",
+	})
+
+	if !strings.Contains(text, "typed") {
+		t.Errorf("expected 'typed' in result, got: %s", text)
+	}
+}
+
+func TestKeyPress(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	text := callTool(t, srv, "key_press", map[string]any{
+		"key": "ctrl+c",
+	})
+
+	if !strings.Contains(text, "ctrl+c") {
+		t.Errorf("expected 'ctrl+c' in result, got: %s", text)
+	}
+}
+
+func TestScroll(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	text := callTool(t, srv, "scroll", map[string]any{
+		"x": 500, "y": 300, "direction": "down", "amount": 5,
+	})
+
+	if !strings.Contains(text, "scrolled") {
+		t.Errorf("expected 'scrolled' in result, got: %s", text)
+	}
+}
+
+func TestBash(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	text := callTool(t, srv, "bash", map[string]any{
+		"command": "Get-Process",
+	})
+
+	if !strings.Contains(text, "command output here") {
+		t.Errorf("expected bash output, got: %s", text)
+	}
+}
+
+func TestScreenshotWithDesktop(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	result := callToolResult(t, srv, "screenshot", map[string]any{
+		"desktop": "win11",
+	})
+
+	_, ok := result.Content[0].(*mcp.ImageContent)
+	if !ok {
+		t.Fatalf("expected ImageContent, got %T", result.Content[0])
+	}
+}
+
+func TestClickWithDesktop(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	// The mock returns {"status":"ok","desktop":"my-rdp"} for non-screenshot
+	// computer actions, but the click tool returns its own "clicked (x, y)" text.
+	// This test verifies the request reaches the mock (no error) with desktop set.
+	text := callTool(t, srv, "click", map[string]any{
+		"desktop": "my-rdp", "x": 50, "y": 60,
+	})
+	if !strings.Contains(text, "clicked") {
+		t.Errorf("expected 'clicked' in result, got: %s", text)
+	}
+}
+
+func TestBashWithDesktop(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	text := callTool(t, srv, "bash", map[string]any{
+		"desktop": "win11",
+		"command": "whoami",
+	})
+	if !strings.Contains(text, "command output here") {
+		t.Errorf("expected bash output, got: %s", text)
 	}
 }
