@@ -65,7 +65,7 @@ func (m *mockDesktop) Type() string                                    { return 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	store := desktop.NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
-	mgr := desktop.NewManager(nil, store, "localhost:4822")
+	mgr := desktop.NewManager(nil, store, "localhost:4822", "")
 	return &Server{
 		desktops:     mgr,
 		display:      tools.DisplayConfig{Width: 1024, Height: 768},

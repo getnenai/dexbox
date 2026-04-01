@@ -60,7 +60,7 @@ func New(opts Options) *Server {
 	} else {
 		store := desktop.NewConnectionStore(desktop.DefaultStorePath())
 		_ = store.Load()
-		desktops = desktop.NewManager(mgr, store, "localhost:4822")
+		desktops = desktop.NewManager(mgr, store, "localhost:4822", opts.SharedDir)
 	}
 
 	return &Server{

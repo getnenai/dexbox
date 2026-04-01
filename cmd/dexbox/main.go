@@ -114,7 +114,7 @@ func cmdStart() *cobra.Command {
 			ctx := context.Background()
 			if guacd.DockerAvailable(ctx) {
 				fmt.Println("Starting guacd...")
-				if err := guacd.Start(ctx); err != nil {
+				if err := guacd.Start(ctx, config.SharedDir); err != nil {
 					fmt.Printf("Warning: failed to start guacd: %v\n", err)
 					fmt.Println("RDP connections will not be available. VMs still work.")
 				} else {
@@ -314,6 +314,7 @@ func newDesktopManager() (*desktop.Manager, error) {
 		vbox.NewManager(config.SOAPAddr, config.VMUser, config.VMPass),
 		store,
 		guacd.DefaultAddr,
+		config.SharedDir,
 	), nil
 }
 
@@ -712,6 +713,7 @@ func cmdRDPAdd() *cobra.Command {
 		height     int
 		ignoreCert bool
 		security   string
+		driveName  string
 	)
 
 	c := &cobra.Command{
@@ -746,6 +748,10 @@ Example:
 				IgnoreCert: ignoreCert,
 				Security:   security,
 			}
+			if driveName != "" {
+				cfg.DriveEnabled = true
+				cfg.DriveName = driveName
+			}
 
 			if err := store.Add(name, cfg); err != nil {
 				return err
@@ -767,6 +773,7 @@ Example:
 	c.Flags().IntVar(&height, "height", 768, "Display height in pixels")
 	c.Flags().BoolVar(&ignoreCert, "ignore-cert", true, "Ignore certificate validation")
 	c.Flags().StringVar(&security, "security", "", "RDP security mode: any (default), rdp, nla, tls (use rdp for VirtualBox VRDE)")
+	c.Flags().StringVar(&driveName, "drive-name", "", "Enable drive redirection with this Windows share name (e.g. MyDrive)")
 	_ = c.MarkFlagRequired("host")
 	_ = c.MarkFlagRequired("user")
 	_ = c.MarkFlagRequired("pass")

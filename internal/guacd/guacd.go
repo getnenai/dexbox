@@ -5,6 +5,7 @@ package guacd
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"os/exec"
 	"strings"
@@ -12,30 +13,42 @@ import (
 )
 
 const (
-	ContainerName = "dexbox-guacd"
-	Image         = "guacamole/guacd:latest"
-	DefaultPort   = 4822
-	DefaultAddr   = "localhost:4822"
+	ContainerName  = "dexbox-guacd"
+	Image          = "guacamole/guacd:latest"
+	DefaultPort    = 4822
+	DefaultAddr    = "localhost:4822"
+	containerMount = "/guacd-shared"
 )
 
 // Start launches the guacd Docker container. Idempotent: if the container
-// is already running, this is a no-op. If it exists but is stopped, it
-// restarts it.
-func Start(ctx context.Context) error {
+// is already running with the correct bind mount, this is a no-op. If the
+// container exists but is missing the required sharedDir mount, it is
+// removed and recreated. If it exists but is stopped, it is restarted.
+func Start(ctx context.Context, sharedDir string) error {
 	running, err := IsRunning(ctx)
 	if err != nil {
 		return err
 	}
 	if running {
+		if sharedDir != "" && !containerHasMount(ctx, sharedDir) {
+			log.Printf("guacd: container %s is missing bind mount for %s; removing and recreating", ContainerName, sharedDir)
+			_ = run(ctx, "docker", "stop", ContainerName)
+			_ = run(ctx, "docker", "rm", "--force", ContainerName)
+			return createAndStart(ctx, sharedDir)
+		}
 		return nil
 	}
 
-	// Check if container exists but is stopped
 	if containerExists(ctx) {
+		if sharedDir != "" && !containerHasMount(ctx, sharedDir) {
+			log.Printf("guacd: container %s is missing bind mount for %s; removing and recreating", ContainerName, sharedDir)
+			_ = run(ctx, "docker", "rm", "--force", ContainerName)
+			return createAndStart(ctx, sharedDir)
+		}
 		return startExisting(ctx)
 	}
 
-	return createAndStart(ctx)
+	return createAndStart(ctx, sharedDir)
 }
 
 // Stop stops and removes the guacd container.
@@ -44,7 +57,7 @@ func Stop(ctx context.Context) error {
 		return nil
 	}
 	_ = run(ctx, "docker", "stop", ContainerName)
-	_ = run(ctx, "docker", "rm", "-f", ContainerName)
+	_ = run(ctx, "docker", "rm", "--force", ContainerName)
 	return nil
 }
 
@@ -53,7 +66,7 @@ func IsRunning(ctx context.Context) (bool, error) {
 	if !DockerAvailable(ctx) {
 		return false, fmt.Errorf("docker is not available; install Docker to use RDP connections")
 	}
-	out, err := output(ctx, "docker", "inspect", "-f", "{{.State.Running}}", ContainerName)
+	out, err := output(ctx, "docker", "inspect", "--format", "{{.State.Running}}", ContainerName)
 	if err != nil {
 		return false, nil // container doesn't exist
 	}
@@ -75,23 +88,31 @@ func IsListening() bool {
 // EnsureRunning starts guacd if it's not already running.
 // If Docker is unavailable but guacd is already listening on DefaultAddr,
 // this is treated as a success — useful when guacd was started externally.
-func EnsureRunning(ctx context.Context) error {
+func EnsureRunning(ctx context.Context, sharedDir string) error {
 	if IsListening() {
 		return nil
 	}
-	running, err := IsRunning(ctx)
-	if err != nil {
-		return err
-	}
-	if running {
-		return nil
-	}
-	return Start(ctx)
+	return Start(ctx, sharedDir)
 }
 
 // DockerAvailable reports whether the docker CLI is present and the daemon is reachable.
 func DockerAvailable(ctx context.Context) bool {
 	return run(ctx, "docker", "info") == nil
+}
+
+// containerHasMount reports whether the named container has sharedDir as a
+// bind-mount source.
+func containerHasMount(ctx context.Context, sharedDir string) bool {
+	out, err := output(ctx, "docker", "inspect", "--format", "{{range .Mounts}}{{.Source}}\n{{end}}", ContainerName)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == sharedDir {
+			return true
+		}
+	}
+	return false
 }
 
 func containerExists(ctx context.Context) bool {
@@ -105,14 +126,18 @@ func startExisting(ctx context.Context) error {
 	return waitForReady(ctx)
 }
 
-func createAndStart(ctx context.Context) error {
-	err := run(ctx, "docker", "run", "-d",
+func createAndStart(ctx context.Context, sharedDir string) error {
+	args := []string{"run", "--detach",
 		"--name", ContainerName,
-		"-p", fmt.Sprintf("%d:%d", DefaultPort, DefaultPort),
+		"--publish", fmt.Sprintf("%d:%d", DefaultPort, DefaultPort),
 		"--restart", "unless-stopped",
-		Image,
-	)
-	if err != nil {
+	}
+	if sharedDir != "" {
+		args = append(args, "--volume", sharedDir+":"+containerMount)
+	}
+	args = append(args, Image)
+
+	if err := run(ctx, "docker", args...); err != nil {
 		return fmt.Errorf("create guacd container: %w", err)
 	}
 	return waitForReady(ctx)
@@ -130,8 +155,7 @@ func waitForReady(ctx context.Context) error {
 		case <-deadline:
 			return fmt.Errorf("timeout waiting for guacd to become ready")
 		case <-ticker.C:
-			running, _ := IsRunning(ctx)
-			if running {
+			if IsListening() {
 				return nil
 			}
 		}

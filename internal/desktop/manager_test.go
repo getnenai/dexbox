@@ -61,7 +61,7 @@ func testPNG(w, h int) []byte {
 
 func TestManagerResolve_VMSession(t *testing.T) {
 	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
-	mgr := NewManager(nil, store, "localhost:4822")
+	mgr := NewManager(nil, store, "localhost:4822", "")
 
 	vm := &mockDesktop{name: "my-vm", typ: "vm", isConnected: true}
 	mgr.mu.Lock()
@@ -82,7 +82,7 @@ func TestManagerResolve_VMSession(t *testing.T) {
 
 func TestManagerResolve_RDPSession(t *testing.T) {
 	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
-	mgr := NewManager(nil, store, "localhost:4822")
+	mgr := NewManager(nil, store, "localhost:4822", "")
 
 	rdp := &mockDesktop{name: "my-rdp", typ: "rdp", isConnected: true}
 	mgr.mu.Lock()
@@ -100,7 +100,7 @@ func TestManagerResolve_RDPSession(t *testing.T) {
 
 func TestManagerGet_RDPSession(t *testing.T) {
 	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
-	mgr := NewManager(nil, store, "localhost:4822")
+	mgr := NewManager(nil, store, "localhost:4822", "")
 
 	rdp := &mockDesktop{name: "my-rdp", typ: "rdp", isConnected: true}
 	mgr.mu.Lock()
@@ -134,7 +134,7 @@ func TestManagerUp_RDPMutexRelease(t *testing.T) {
 		Width:    1024,
 		Height:   768,
 	})
-	mgr := NewManager(nil, store, "localhost:4822")
+	mgr := NewManager(nil, store, "localhost:4822", "")
 
 	ctx := context.Background()
 
@@ -344,7 +344,7 @@ func TestManagerUp_RDPDeadlock(t *testing.T) {
 		Width:    1024,
 		Height:   768,
 	})
-	mgr := NewManager(nil, store, "localhost:4822")
+	mgr := NewManager(nil, store, "localhost:4822", "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
