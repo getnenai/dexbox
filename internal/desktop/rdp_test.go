@@ -283,8 +283,13 @@ func TestRDP_buildGuacParams(t *testing.T) {
 			},
 		},
 		{
-			name:       "DriveDisabled omits drive params",
-			cfg:        func() RDPConfig { c := base; c.DriveEnabled = false; return c }(),
+			name: "DriveDisabled omits drive params even with non-empty DriveName",
+			cfg: func() RDPConfig {
+				c := base
+				c.DriveEnabled = false
+				c.DriveName = "disabled-drive"
+				return c
+			}(),
 			wantAbsent: []string{"drive-name", "drive-path"},
 		},
 		{
