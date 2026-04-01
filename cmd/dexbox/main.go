@@ -539,21 +539,30 @@ func cmdCreate() *cobra.Command {
 
 func cmdCreateVM() *cobra.Command {
 	var isoPath string
+	var fromVM string
 	c := &cobra.Command{
 		Use:   "vm <name>",
-		Short: "Install VirtualBox and provision a new Windows VM",
-		Long: `Install VirtualBox (if needed), then create and provision a Windows 11 VM.
+		Short: "Create a new Windows VM (from ISO or by cloning)",
+		Long: `Create a Windows 11 VM either by installing from an ISO or by cloning
+an existing VM.
 
-The VM name is used as the VirtualBox machine name and must be unique.
-A Windows ISO must be provided via --iso.
+When --iso is provided, a full Windows installation runs (15-30 minutes).
+When --from is provided, an existing VM is cloned (seconds).
+Exactly one of --iso or --from must be specified.
 
-Example:
-  dexbox create vm desktop-1 --iso ~/Downloads/Win11_25H2_English_x64.iso`,
+Examples:
+  dexbox create vm desktop-1 --iso ~/Downloads/Win11_25H2_English_x64.iso
+  dexbox create vm desktop-2 --from desktop-1`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
+
+			if fromVM != "" {
+				return vbox.Clone(context.Background(), fromVM, name)
+			}
+
 			if isoPath == "" {
-				return fmt.Errorf("Windows ISO required: use --iso <path>")
+				return fmt.Errorf("must specify --iso <path> or --from <source-vm>")
 			}
 			expandedISO := isoPath
 			if len(isoPath) > 1 && isoPath[0] == '~' {
@@ -563,8 +572,9 @@ Example:
 			return vbox.Install(context.Background(), name, expandedISO)
 		},
 	}
-	c.Flags().StringVar(&isoPath, "iso", "", "Path to Windows ISO (required)")
-	_ = c.MarkFlagRequired("iso")
+	c.Flags().StringVar(&isoPath, "iso", "", "Path to Windows ISO (for fresh install)")
+	c.Flags().StringVar(&fromVM, "from", "", "Source VM to clone (for instant creation)")
+	c.MarkFlagsMutuallyExclusive("iso", "from")
 	return c
 }
 
