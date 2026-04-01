@@ -81,6 +81,9 @@ def main():
         if not fireworks_key:
             print("ERROR: FIREWORKS_API_KEY is not set. Add it to your .env file.")
             sys.exit(1)
+        if not os.environ.get("DEXBOX_MODEL"):
+            print("ERROR: DEXBOX_MODEL must be set for fireworks (e.g., accounts/fireworks/models/kimi-k2p5).")
+            sys.exit(1)
 
         model = ChatOpenAI(
             model=DEXBOX_MODEL,
