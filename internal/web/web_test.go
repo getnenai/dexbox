@@ -1,6 +1,7 @@
 package web_test
 
 import (
+	"bufio"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -56,6 +57,7 @@ func TestServeEvents_InitialConnected(t *testing.T) {
 	// Inject an active RDP session without dialing guacd. Disconnect() is a
 	// no-op when client is nil, so this is safe.
 	rdp := desktop.NewBringRDP("win", desktop.RDPConfig{Host: "localhost", Port: 3389}, "localhost:4822")
+	rdp.SetConnected(true) // simulate a live session
 	mgr.SetSession("win", rdp)
 
 	body := collectSSE(t, mgr, "win", 100*time.Millisecond)
@@ -68,52 +70,71 @@ func TestServeEvents_InitialConnected(t *testing.T) {
 // TestServeEvents_ReceivesSessionDown verifies that when an active agent
 // session is torn down via Down(), the SSE stream receives a dynamic
 // "agent_disconnected" event after the initial "agent_connected".
+//
+// A real httptest.Server is used so the streaming body can be read
+// line-by-line without data races. Blocking on the first event guarantees
+// the handler has registered its mgr.Subscribe call before Down() fires.
 func TestServeEvents_ReceivesSessionDown(t *testing.T) {
 	mgr := newTestManager(t)
 	rdp := desktop.NewBringRDP("win", desktop.RDPConfig{Host: "localhost", Port: 3389}, "localhost:4822")
+	rdp.SetConnected(true) // simulate a live session
 	mgr.SetSession("win", rdp)
 
-	h := web.Handler(mgr, "localhost:4822")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	req := httptest.NewRequest("GET", "/desktops/win/events", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
+	srv := httptest.NewServer(web.Handler(mgr, "localhost:4822"))
+	t.Cleanup(srv.Close)
 
-	handlerDone := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", srv.URL+"/desktops/win/events", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET events: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Stream non-empty SSE lines through a channel so we can select with a
+	// timeout and avoid blocking the test goroutine indefinitely.
+	lines := make(chan string, 4)
 	go func() {
-		h.ServeHTTP(rec, req)
-		close(handlerDone)
+		defer close(lines)
+		sc := bufio.NewScanner(resp.Body)
+		for sc.Scan() {
+			if line := sc.Text(); line != "" {
+				lines <- line
+			}
+		}
 	}()
 
-	// Subscribe directly so we can wait for the SessionDown event via a
-	// channel instead of a second time.Sleep. serveEvents calls mgr.Subscribe
-	// as its very first action, so a brief yield is enough to ensure the
-	// handler's subscription is registered before we call Down().
-	evts, unsub := mgr.Subscribe("win")
-	defer unsub()
-	time.Sleep(10 * time.Millisecond) // let handler goroutine reach its Subscribe call
+	// Block until the initial "agent_connected" frame; this is the sync
+	// point that proves the handler has called mgr.Subscribe.
+	select {
+	case line := <-lines:
+		if !strings.Contains(line, "agent_connected") {
+			t.Fatalf("expected initial agent_connected, got %q", line)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for initial agent_connected")
+	}
 
+	// Down() cannot race past the handler's subscription now.
 	if err := mgr.Down(context.Background(), "win", false, false); err != nil {
 		t.Fatalf("Down failed: %v", err)
 	}
 
-	// Wait for SessionDown on our channel; both subscriptions were registered
-	// before Down() fired, so the handler has also received the event.
 	select {
-	case <-evts:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("timed out waiting for SessionDown event")
-	}
-
-	cancel()
-	<-handlerDone
-
-	body := rec.Body.String()
-	if !strings.Contains(body, "data: agent_connected") {
-		t.Errorf("expected initial agent_connected in body, got %q", body)
-	}
-	if !strings.Contains(body, "data: agent_disconnected") {
-		t.Errorf("expected agent_disconnected after Down(), got %q", body)
+	case line, ok := <-lines:
+		if !ok {
+			t.Fatal("SSE stream closed before agent_disconnected arrived")
+		}
+		if !strings.Contains(line, "agent_disconnected") {
+			t.Errorf("expected agent_disconnected, got %q", line)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for agent_disconnected")
 	}
 }
 

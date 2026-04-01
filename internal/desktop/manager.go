@@ -251,15 +251,20 @@ func (m *Manager) Subscribe(name string) (<-chan SessionEvent, func()) {
 }
 
 // ActiveRDP returns the active *BringRDP session for the named desktop, if any.
+// Only returns a session whose Connected() method reports true; a session that
+// lost its guacd connection without an explicit Down() call is excluded.
 func (m *Manager) ActiveRDP(name string) (*BringRDP, bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	d, ok := m.sessions[name]
+	m.mu.Unlock()
 	if !ok {
 		return nil, false
 	}
 	r, ok := d.(*BringRDP)
-	return r, ok
+	if !ok || !r.Connected() {
+		return nil, false
+	}
+	return r, true
 }
 
 // RDPConfig returns the stored connection configuration for the named RDP desktop.
@@ -268,15 +273,22 @@ func (m *Manager) RDPConfig(name string) (RDPConfig, bool) {
 }
 
 // notify sends a SessionEvent to all subscribers for the named desktop.
-// It is non-blocking: a slow subscriber that has not drained its channel
-// will simply miss the event (the channel is capped at 1).
+// If a subscriber's channel is full, the stale event is replaced with the
+// newest one (coalesce) so no transition is silently lost.
 func (m *Manager) notify(name string, t SessionEventType) {
 	m.subsMu.Lock()
 	defer m.subsMu.Unlock()
+	evt := SessionEvent{Type: t, Name: name}
 	for _, ch := range m.subs[name] {
 		select {
-		case ch <- SessionEvent{Type: t, Name: name}:
+		case ch <- evt:
 		default:
+			// Channel full: drain stale event then deliver newest.
+			select {
+			case <-ch:
+			default:
+			}
+			ch <- evt
 		}
 	}
 }

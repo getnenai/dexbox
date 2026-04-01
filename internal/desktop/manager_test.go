@@ -260,6 +260,7 @@ func TestManagerActiveRDP_ReturnsRDP(t *testing.T) {
 	mgr := NewManager(nil, store, "localhost:4822")
 
 	rdp := NewBringRDP("win", RDPConfig{Host: "localhost", Port: 3389}, "localhost:4822")
+	rdp.SetConnected(true) // simulate a live session without dialing guacd
 	mgr.SetSession("win", rdp)
 
 	got, ok := mgr.ActiveRDP("win")

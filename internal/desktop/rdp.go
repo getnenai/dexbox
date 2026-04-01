@@ -46,6 +46,7 @@ type BringRDP struct {
 
 	client *bring.Client
 	connID string // guacd connection ID from handshake; set after SessionActive
+	live   bool   // true once Connect succeeds; false after Disconnect
 	state  bring.SessionState
 	mu     sync.Mutex
 	done   chan struct{} // closed when client.Start() returns
@@ -117,6 +118,7 @@ func (r *BringRDP) Connect(ctx context.Context) error {
 		case <-ticker.C:
 			if client.State() == bring.SessionActive {
 				r.connID = client.ConnectionID()
+				r.live = true
 				// Give the display a moment to receive the initial frame
 				time.Sleep(500 * time.Millisecond)
 				return nil
@@ -137,13 +139,22 @@ func (r *BringRDP) Disconnect() error {
 	// Setting client to nil and letting the GC clean up is the best we can do.
 	// The underlying TCP connection will be closed when the client is GC'd.
 	r.client = nil
+	r.live = false
 	return nil
 }
 
 func (r *BringRDP) Connected() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.client != nil && r.client.State() == bring.SessionActive
+	return r.live
+}
+
+// SetConnected marks the session as live or not without dialing guacd.
+// Intended for use in tests that need to simulate an active session.
+func (r *BringRDP) SetConnected(b bool) {
+	r.mu.Lock()
+	r.live = b
+	r.mu.Unlock()
 }
 
 func (r *BringRDP) Screenshot(ctx context.Context) ([]byte, error) {
