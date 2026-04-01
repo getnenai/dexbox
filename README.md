@@ -136,6 +136,44 @@ cp ../.env.example ../.env  # add your ANTHROPIC_API_KEY
 uv run python agent.py
 ```
 
+## MCP Integration
+
+Dexbox includes a built-in [MCP](https://modelcontextprotocol.io/) server so IDE AI assistants can manage desktops directly.
+
+**Requires** `dexbox start` to be running.
+
+### Cursor
+
+Add to `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "dexbox": {
+      "command": "dexbox",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Claude Code
+
+```bash
+claude mcp add dexbox -- dexbox mcp
+```
+
+### Available tools
+
+| Tool | Description |
+|---|---|
+| `list_desktops` | List all desktops with state |
+| `create_desktop` | Register a new RDP connection |
+| `destroy_desktop` | Delete a VM or unregister RDP |
+| `start_desktop` | Boot VM or connect RDP session |
+| `stop_desktop` | Shut down VM guest OS or disconnect RDP session |
+| `get_desktop` | Get single desktop status |
+
 ## How It Works
 
 Dexbox is a **tool server**, not an agent. Your AI agent framework calls the HTTP API with tool actions in the model's native format. Dexbox parses, executes, and returns results — zero translation needed on your side.

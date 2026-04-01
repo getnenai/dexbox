@@ -32,8 +32,10 @@ import (
 	"github.com/getnenai/dexbox/internal/config"
 	"github.com/getnenai/dexbox/internal/desktop"
 	"github.com/getnenai/dexbox/internal/guacd"
+	"github.com/getnenai/dexbox/internal/mcpserver"
 	"github.com/getnenai/dexbox/internal/server"
 	"github.com/getnenai/dexbox/internal/vbox"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func main() {
@@ -73,6 +75,7 @@ Environment variables (or .env file):
 		cmdStart(), cmdStop(), cmdStatus(),
 		cmdUp(), cmdDown(), cmdList(), cmdView(),
 		cmdCreate(), cmdVM(), cmdRDP(), cmdRunAction(),
+		cmdMCP(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -1037,4 +1040,50 @@ func parseCoordinate(s string) (int, int, error) {
 		return 0, 0, fmt.Errorf("invalid y coordinate: %w", err)
 	}
 	return x, y, nil
+}
+
+// ---------------------------------------------------------------------------
+// dexbox mcp
+// ---------------------------------------------------------------------------
+
+func cmdMCP() *cobra.Command {
+	var baseURL string
+
+	c := &cobra.Command{
+		Use:   "mcp",
+		Short: "Run the MCP server (stdio transport)",
+		Long: `Run a Model Context Protocol (MCP) server over stdin/stdout.
+
+This exposes Dexbox desktop lifecycle tools (list, create, destroy, start,
+stop, get) so that IDE AI assistants (Cursor, Claude Code, etc.) can manage
+desktops directly.
+
+Requires the dexbox server to be running (dexbox start).
+
+IDE configuration example (Cursor / Claude Code):
+
+  {
+    "mcpServers": {
+      "dexbox": {
+        "command": "dexbox",
+        "args": ["mcp"]
+      }
+    }
+  }`,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if baseURL == "" {
+				addr := config.Listen
+				if addr == "" || addr[0] == ':' {
+					addr = "localhost" + addr
+				}
+				baseURL = "http://" + addr
+			}
+			srv := mcpserver.New(baseURL)
+			return srv.Run(context.Background(), &mcp.StdioTransport{})
+		},
+	}
+
+	c.Flags().StringVar(&baseURL, "base-url", "", "Dexbox server base URL (default: derived from DEXBOX_LISTEN)")
+	return c
 }
