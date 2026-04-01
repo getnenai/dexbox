@@ -279,7 +279,7 @@ func CreateVM(ctx context.Context, name string, cfg VMConfig) error {
 }
 
 // CloneVM clones an existing VM to create a new one. The source must be
-// powered off or saved. VBoxManage handles disk cloning, UUID regeneration,
+// powered off or aborted. VBoxManage handles disk cloning, UUID regeneration,
 // and MAC address regeneration automatically. A 5-minute timeout is used
 // because cloning a large VDI can exceed the default 30 seconds.
 func CloneVM(ctx context.Context, src, dst string) error {
