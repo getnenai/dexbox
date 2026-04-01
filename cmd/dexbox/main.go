@@ -190,19 +190,26 @@ func cmdStop() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 
+			fmt.Println("Stopping dexbox server...")
+			_ = exec.Command("pkill", "-f", "dexbox start").Run()
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if exec.Command("pgrep", "-f", "dexbox start").Run() != nil {
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			_ = exec.Command("pkill", "-9", "-f", "dexbox start").Run()
+
 			fmt.Println("Stopping vboxwebsrv...")
 			_ = exec.Command("pkill", "-f", "vboxwebsrv").Run()
-
-			// Verify the process actually died.
-			deadline := time.Now().Add(5 * time.Second)
+			deadline = time.Now().Add(5 * time.Second)
 			for time.Now().Before(deadline) {
 				if exec.Command("pgrep", "-f", "vboxwebsrv").Run() != nil {
 					break
 				}
 				time.Sleep(500 * time.Millisecond)
 			}
-
-			// Force kill if still alive.
 			_ = exec.Command("pkill", "-9", "-f", "vboxwebsrv").Run()
 
 			fmt.Println("Stopping guacd...")

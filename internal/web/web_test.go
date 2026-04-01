@@ -20,7 +20,7 @@ func newTestManager(t *testing.T) *desktop.Manager {
 	t.Helper()
 	store := desktop.NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
 	store.Add("win", desktop.RDPConfig{Host: "localhost", Port: 3389})
-	return desktop.NewManager(nil, store, "localhost:4822")
+	return desktop.NewManager(nil, store, "localhost:4822", "")
 }
 
 // collectSSE runs the SSE handler for the given desktop name until the context
@@ -142,7 +142,7 @@ func TestServeEvents_ReceivesSessionDown(t *testing.T) {
 // for a desktop that has no stored RDP config returns 404.
 func TestServeTunnel_UnknownDesktop_NotFound(t *testing.T) {
 	store := desktop.NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
-	mgr := desktop.NewManager(nil, store, "localhost:4822")
+	mgr := desktop.NewManager(nil, store, "localhost:4822", "")
 
 	h := web.Handler(mgr, "localhost:4822")
 	req := httptest.NewRequest("GET", "/desktops/unknown/tunnel", nil)
