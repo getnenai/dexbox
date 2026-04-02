@@ -1,0 +1,15 @@
+{
+  "name": "@nen/openclaw-dexbox",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Control Windows VMs and RDP desktops via dexbox",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^5.7.0"
+  }
+}
