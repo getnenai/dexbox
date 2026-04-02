@@ -1,6 +1,6 @@
 .PHONY: all test build-cli install install-cli go-install lint clean help
 .PHONY: agent-py-lc-install agent-py-lc-run agent-py-lc-lint agent-ts-vercel-install agent-ts-vercel-run
-.PHONY: extend-parse-ts extend-parse-py dexbox-run type-test
+.PHONY: extend-parse-ts extend-parse-py dexbox-run
 
 all: install-cli ## Default target (build + install to ~/.local/bin)
 
