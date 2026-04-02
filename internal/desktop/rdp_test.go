@@ -345,6 +345,12 @@ func TestRDP_buildGuacParams(t *testing.T) {
 					t.Errorf("param %q should be absent, got %q", k, v)
 				}
 			}
+
+			for k, v := range params {
+				if _, expected := check[k]; !expected {
+					t.Errorf("unexpected param %q = %q", k, v)
+				}
+			}
 		})
 	}
 }
