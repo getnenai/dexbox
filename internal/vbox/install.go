@@ -173,9 +173,8 @@ func Clone(ctx context.Context, srcVM, dstVM string) error {
 	// Done
 	fmt.Println("")
 	fmt.Printf("VM %q cloned from %q successfully!\n", dstVM, srcVM)
-	fmt.Printf("  User:       dexbox\n")
-	fmt.Printf("  Password:   dexbox123\n")
-	fmt.Printf("  Shared dir: %s\n", sharedDir)
+	fmt.Printf("  Credentials: [same as %q]\n", srcVM)
+	fmt.Printf("  Shared dir:  %s\n", sharedDir)
 	fmt.Println("")
 	fmt.Println("Next steps:")
 	fmt.Println("  dexbox start     # Start the tool server")
