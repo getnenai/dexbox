@@ -36,7 +36,9 @@ dexbox-run: build-cli ## Build and run dexbox (ARGS=... to pass flags, e.g. ARGS
 	./bin/dexbox $(ARGS)
 
 type-test: build-cli ## Type a test string via dexbox run (DESKTOP=name TEXT=string)
-	./bin/dexbox run --desktop $(DESKTOP) --type computer --action type --text "$(TEXT)"
+	$(if $(strip $(DESKTOP)),,$(error DESKTOP is required))
+	$(if $(strip $(TEXT)),,$(error TEXT is required))
+	./bin/dexbox run --desktop "$(DESKTOP)" --type computer --action type --text "$(TEXT)"
 
 # --- Python LangChain Agent (uv) ---
 
