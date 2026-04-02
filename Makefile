@@ -35,11 +35,6 @@ clean: ## Remove build artifacts
 dexbox-run: build-cli ## Build and run dexbox (ARGS=... to pass flags, e.g. ARGS="run --type computer --action screenshot")
 	./bin/dexbox $(ARGS)
 
-type-test: build-cli ## Type a test string via dexbox run (DESKTOP=name TEXT=string)
-	$(if $(strip $(DESKTOP)),,$(error DESKTOP is required))
-	$(if $(strip $(TEXT)),,$(error TEXT is required))
-	./bin/dexbox run --desktop "$(DESKTOP)" --type computer --action type --text "$(TEXT)"
-
 # --- Python LangChain Agent (uv) ---
 
 agent-py-lc-install: ## Install Python LangChain agent dependencies
