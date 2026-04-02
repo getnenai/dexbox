@@ -35,7 +35,7 @@ brews:
     directory: Formula
     homepage: "https://github.com/getnenai/dexbox"
     description: "Computer-use tool server for Windows VMs and RDP desktops"
-    license: "MIT"
+    license: "Apache-2.0"
     install: |
       bin.install "dexbox"
     caveats: |
