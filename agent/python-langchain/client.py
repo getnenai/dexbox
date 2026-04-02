@@ -11,6 +11,7 @@ import os
 import httpx
 
 DEXBOX_URL = os.getenv("DEXBOX_URL", "http://localhost:8600")
+DEXBOX_PROVIDER = os.getenv("DEXBOX_PROVIDER", "anthropic")
 DEXBOX_MODEL = os.getenv("DEXBOX_MODEL", "claude-sonnet-4-20250514")
 DEXBOX_VM = os.getenv("DEXBOX_VM", "").strip()
 

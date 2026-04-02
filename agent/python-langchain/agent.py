@@ -1,11 +1,11 @@
-"""Dexbox LangChain Agent — computer-use agent loop with Claude.
+"""Dexbox LangChain Agent — computer-use agent loop.
 
 Run with:
     make agent-py-lc-run
 
 Requires:
     - dexbox server running (dexbox start)
-    - ANTHROPIC_API_KEY set in root .env or environment
+    - ANTHROPIC_API_KEY (default) or FIREWORKS_API_KEY (when DEXBOX_PROVIDER=fireworks)
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain.agents import create_agent
 
-from client import DEXBOX_MODEL, fetch_tool_schemas, health_check
+from client import DEXBOX_MODEL, DEXBOX_PROVIDER, fetch_tool_schemas, health_check
 from tools import build_tools_from_schema
 from tools.extend import build_parse_tool
 
@@ -74,11 +74,27 @@ def main():
     print()
 
     # Create the agent using LangChain's create_agent API
-    # Use explicit max_tokens to avoid the 64K default which overflows
-    # Claude's 200K context window when screenshots accumulate.
-    from langchain_anthropic import ChatAnthropic
+    if DEXBOX_PROVIDER == "fireworks":
+        from langchain_openai import ChatOpenAI
 
-    model = ChatAnthropic(model=DEXBOX_MODEL, max_tokens=4096)
+        fireworks_key = os.environ.get("FIREWORKS_API_KEY")
+        if not fireworks_key:
+            print("ERROR: FIREWORKS_API_KEY is not set. Add it to your .env file.")
+            sys.exit(1)
+        if not os.environ.get("DEXBOX_MODEL"):
+            print("ERROR: DEXBOX_MODEL must be set for fireworks (e.g., accounts/fireworks/models/kimi-k2p5).")
+            sys.exit(1)
+
+        model = ChatOpenAI(
+            model=DEXBOX_MODEL,
+            base_url="https://api.fireworks.ai/inference/v1",
+            api_key=fireworks_key,
+            max_tokens=4096,
+        )
+    else:
+        from langchain_anthropic import ChatAnthropic
+
+        model = ChatAnthropic(model=DEXBOX_MODEL, max_tokens=4096)
     agent = create_agent(
         model=model,
         tools=all_tools,

@@ -8,7 +8,7 @@ from typing import Any
 from langchain_core.tools import StructuredTool
 from pydantic import create_model
 
-from client import call_dexbox, call_dexbox_raw
+from client import DEXBOX_PROVIDER, call_dexbox, call_dexbox_raw
 
 # Tools to exclude from dynamic loading
 _EXCLUDE_TOOLS: set[str] = set()
@@ -89,6 +89,11 @@ def _make_tool_fn(tool_name: str):
             img.save(buf, format="JPEG", quality=60)
             b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
+            if DEXBOX_PROVIDER == "fireworks":
+                return [{
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                }]
             return [{
                 "type": "image",
                 "source": {
