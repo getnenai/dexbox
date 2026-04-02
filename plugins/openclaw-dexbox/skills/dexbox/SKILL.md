@@ -81,6 +81,10 @@ All action tools accept an optional `desktop` parameter:
 | `scroll` | Scroll at x,y with direction (up/down) and amount |
 | `bash` | Run a PowerShell command in the guest VM |
 
+## Architecture
+
+All tool calls go to the local dexbox server (default `http://localhost:8600`). Action tools use `model=claude-mcp` as an internal wire format selector to route through the server's Anthropic adapter for request/response parsing. This is a local format choice, not an external model call. All data (screenshots, command output) stays between this plugin and the dexbox server on your machine.
+
 ## Tips
 
 - This is a Windows VM — use Windows-style paths (e.g. `C:\Users\dexbox\Desktop\file.txt`)
