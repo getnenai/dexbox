@@ -38,12 +38,16 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// version is set by goreleaser via ldflags at build time.
+var version = "dev"
+
 func main() {
 	var envFile string
 
 	root := &cobra.Command{
-		Use:   "dexbox",
-		Short: "dexbox — VirtualBox-based computer-use tool server",
+		Use:     "dexbox",
+		Short:   "dexbox — VirtualBox-based computer-use tool server",
+		Version: version,
 		Long: `dexbox is a VirtualBox-based computer-use tool server.
 
 It manages Windows VMs and exposes an HTTP API for supported computer-use actions

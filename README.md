@@ -17,7 +17,26 @@ https://github.com/user-attachments/assets/50d50af4-829d-4cb1-a0c0-60bb4d4401a4
 
 ## Quick Start
 
-Clone and install the CLI
+Install dexbox:
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/getnenai/dexbox/main/install.sh | sh
+```
+
+Or install a specific version:
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/getnenai/dexbox/main/install.sh | sh -s -- -v v1.0.0
+```
+
+> **Note:** The installer puts `dexbox` in `~/.local/bin`. Ensure this directory is on your `PATH`:
+>
+> ```bash
+> export PATH="$HOME/.local/bin:$PATH"  # add to ~/.zshrc or ~/.bashrc
+> ```
+
+<details>
+<summary>Install from source</summary>
 
 ```bash
 git clone https://github.com/getnenai/dexbox.git
@@ -25,11 +44,7 @@ cd dexbox
 make
 ```
 
-> **Note:** `make` installs `dexbox` to `~/.local/bin`. Ensure this directory is on your `PATH`:
->
-> ```bash
-> export PATH="$HOME/.local/bin:$PATH"  # add to ~/.zshrc or ~/.bashrc
-> ```
+</details>
 
 Provision a Windows 11 VM (downloads ISO, creates VM, runs unattended install)
 

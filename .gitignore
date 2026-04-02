@@ -27,3 +27,4 @@ __pycache__/
 # Dexbox
 artifacts/
 assets/
+dist/
