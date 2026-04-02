@@ -117,7 +117,7 @@ download "$CHECKSUM_URL" "${TMPDIR}/checksums.txt"
 
 # Verify checksum
 echo "Verifying checksum..."
-EXPECTED=$(grep "${ARCHIVE}" "${TMPDIR}/checksums.txt" | awk '{print $1}')
+EXPECTED=$(awk -v f="${ARCHIVE}" '$2 == f {print $1}' "${TMPDIR}/checksums.txt")
 if [ -z "$EXPECTED" ]; then
   echo "Error: checksum not found for ${ARCHIVE}" >&2
   exit 1
@@ -128,8 +128,8 @@ if command -v sha256sum >/dev/null 2>&1; then
 elif command -v shasum >/dev/null 2>&1; then
   ACTUAL=$(shasum -a 256 "${TMPDIR}/${ARCHIVE}" | awk '{print $1}')
 else
-  echo "Warning: sha256sum/shasum not found, skipping checksum verification" >&2
-  ACTUAL="$EXPECTED"
+  echo "Error: sha256sum or shasum is required for checksum verification" >&2
+  exit 1
 fi
 
 if [ "$EXPECTED" != "$ACTUAL" ]; then
