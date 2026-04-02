@@ -224,20 +224,8 @@ func TestRDP_buildGuacParams(t *testing.T) {
 		wantAbsent  []string
 	}{
 		{
-			name: "defaults: security=any, no optional params",
-			cfg:  base,
-			wantPresent: map[string]string{
-				"hostname":         "10.0.0.1",
-				"port":             "3389",
-				"username":         "user",
-				"password":         "pass",
-				"width":            "1920",
-				"height":           "1080",
-				"security":         "any",
-				"client-name":      "Dexbox",
-				"disable-audio":    "true",
-				"enable-wallpaper": "false",
-			},
+			name:       "defaults: security=any, no optional params",
+			cfg:        base,
 			wantAbsent: []string{"ignore-cert", "drive-name", "drive-path"},
 		},
 		{
@@ -312,12 +300,36 @@ func TestRDP_buildGuacParams(t *testing.T) {
 		},
 	}
 
+	// baseline holds params that must be present in every output regardless
+	// of which optional features are enabled. tt.wantPresent entries override
+	// baseline values (e.g. a case that sets security="nla" overrides "any").
+	baseline := map[string]string{
+		"hostname":         "10.0.0.1",
+		"port":             "3389",
+		"username":         "user",
+		"password":         "pass",
+		"width":            "1920",
+		"height":           "1080",
+		"security":         "any",
+		"client-name":      "Dexbox",
+		"disable-audio":    "true",
+		"enable-wallpaper": "false",
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := NewBringRDP("test", tt.cfg, "localhost:4822")
 			params := r.buildGuacParams()
 
-			for k, want := range tt.wantPresent {
+			check := make(map[string]string, len(baseline)+len(tt.wantPresent))
+			for k, v := range baseline {
+				check[k] = v
+			}
+			for k, v := range tt.wantPresent {
+				check[k] = v
+			}
+
+			for k, want := range check {
 				got, ok := params[k]
 				if !ok {
 					t.Errorf("param %q missing", k)
