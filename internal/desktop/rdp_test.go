@@ -90,7 +90,11 @@ func TestScreenshot_ReturnsPNG(t *testing.T) {
 	}
 	// PNG files start with the 8-byte PNG signature.
 	if len(data) < 8 || string(data[:4]) != "\x89PNG" {
-		t.Fatalf("expected PNG data, got %d bytes starting with %q", len(data), data[:4])
+		prefix := data
+		if len(prefix) > 4 {
+			prefix = prefix[:4]
+		}
+		t.Fatalf("expected PNG data, got %d bytes starting with %q", len(data), string(prefix))
 	}
 }
 
