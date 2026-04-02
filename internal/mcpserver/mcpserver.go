@@ -7,7 +7,6 @@ package mcpserver
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -97,7 +96,7 @@ func errorResult(msg string) *mcp.CallToolResult {
 func imageResult(pngBytes []byte) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.ImageContent{
-			Data:     []byte(base64.StdEncoding.EncodeToString(pngBytes)),
+			Data:     pngBytes,
 			MIMEType: "image/png",
 		}},
 	}
@@ -299,14 +298,18 @@ func New(baseURL string) *mcp.Server {
 		Name:        "click",
 		Description: "Click at a coordinate on the desktop. Use button to specify left (default), right, middle, or double click.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input clickInput) (*mcp.CallToolResult, empty, error) {
-		action := "left_click"
+		var action string
 		switch input.Button {
+		case "", "left":
+			action = "left_click"
 		case "right":
 			action = "right_click"
 		case "middle":
 			action = "middle_click"
 		case "double":
 			action = "double_click"
+		default:
+			return errorResult(fmt.Sprintf("unsupported button %q; use left, right, middle, or double", input.Button)), empty{}, nil
 		}
 		_, err := doActionRaw(ctx, baseURL, input.Desktop, map[string]any{
 			"type":       "computer_20250124",
