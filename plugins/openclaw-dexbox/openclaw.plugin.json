@@ -2,7 +2,7 @@
   "id": "dexbox",
   "name": "Dexbox Desktop Control",
   "version": "1.0.0",
-  "description": "Control Windows VMs and RDP desktops via dexbox",
+  "description": "Create, control, and manage multiple Windows VMs and RDP desktops from your agent. Take screenshots, click, type, scroll, run PowerShell commands, and manage desktop lifecycle -- all through 12 tools powered by dexbox.",
   "skills": ["./skills"],
   "configSchema": {
     "type": "object",
