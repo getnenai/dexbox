@@ -110,9 +110,13 @@ func serveTunnel(w http.ResponseWriter, r *http.Request, name string, mgr *deskt
 			"disable-audio":    "true",
 			"enable-wallpaper": "false",
 		}
-		if cfg.DriveEnabled && cfg.DriveName != "" {
+		if cfg.DriveEnabled {
+			driveName := strings.TrimSpace(cfg.DriveName)
+			if driveName == "" {
+				driveName = "Shared"
+			}
 			params["enable-drive"] = "true"
-			params["drive-name"] = cfg.DriveName
+			params["drive-name"] = driveName
 			params["drive-path"] = guacd.ContainerMount
 			params["create-drive-path"] = "true"
 		}
