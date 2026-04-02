@@ -139,17 +139,13 @@ func cmdStart() *cobra.Command {
 				// We never send on it, so it blocks forever.
 			}
 
-			// Start guacd (Docker) for RDP support
-			if guacd.DockerAvailable(ctx) {
-				fmt.Println("Starting guacd...")
-				if err := guacd.Start(ctx, config.SharedDir); err != nil {
-					fmt.Printf("Warning: failed to start guacd: %v\n", err)
-					fmt.Println("RDP connections will not be available.")
-				} else {
-					fmt.Println("guacd running on port 4822")
-				}
+			// Start guacd for RDP support (native binary > Docker > skip)
+			fmt.Println("Starting guacd...")
+			if err := guacd.EnsureRunning(ctx, config.SharedDir); err != nil {
+				fmt.Printf("Warning: failed to start guacd: %v\n", err)
+				fmt.Println("RDP connections will not be available.")
 			} else {
-				fmt.Println("Docker not available — skipping guacd (RDP connections disabled)")
+				fmt.Println("guacd running on port 4822")
 			}
 
 			fmt.Println("Starting dexbox server...")
@@ -169,13 +165,18 @@ func cmdStart() *cobra.Command {
 			errCh := make(chan error, 1)
 			go func() { errCh <- srv.Run() }()
 
+			stopGuacd := func() {
+				guacd.StopNative()
+				_ = guacd.Stop(context.Background())
+			}
+
 			select {
 			case err := <-errCh:
 				stopVBox()
-				_ = guacd.Stop(context.Background())
+				stopGuacd()
 				return err
 			case err := <-vboxDied:
-				_ = guacd.Stop(context.Background())
+				stopGuacd()
 				if err != nil {
 					return fmt.Errorf("vboxwebsrv exited unexpectedly: %w", err)
 				}
@@ -183,7 +184,7 @@ func cmdStart() *cobra.Command {
 			case <-sigCtx.Done():
 				fmt.Println("\nShutting down...")
 				stopVBox()
-				_ = guacd.Stop(context.Background())
+				stopGuacd()
 				return nil
 			}
 		},
@@ -227,6 +228,7 @@ func cmdStop() *cobra.Command {
 			_ = exec.Command("pkill", "-9", "-f", "vboxwebsrv").Run()
 
 			fmt.Println("Stopping guacd...")
+			guacd.StopNative()
 			_ = guacd.Stop(ctx)
 
 			fmt.Println("Stopped.")

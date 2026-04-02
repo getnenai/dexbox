@@ -1,5 +1,8 @@
-// Package guacd manages the Apache Guacamole guacd Docker container
-// used as the RDP connection proxy.
+// Package guacd manages the guacd RDP proxy. It supports three modes:
+//
+//  1. Native binary (bundled via Homebrew libexec or found in PATH)
+//  2. Docker container (guacamole/guacd:latest)
+//  3. External (already listening on DefaultAddr)
 package guacd
 
 import (
@@ -7,7 +10,9 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -85,14 +90,90 @@ func IsListening() bool {
 	return true
 }
 
-// EnsureRunning starts guacd if it's not already running, and reconciles the
-// bind-mount when sharedDir is non-empty. If Docker is unavailable but guacd
-// is already listening on DefaultAddr with no sharedDir required, this is
-// treated as a success — useful when guacd was started externally.
+// FindNativeBinary searches for a guacd binary in the following order:
+//  1. Homebrew libexec relative to the dexbox binary (../libexec/sbin/guacd)
+//  2. guacd in PATH
+//
+// Returns the absolute path if found, empty string otherwise.
+func FindNativeBinary() string {
+	// Check Homebrew libexec layout relative to dexbox binary
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), "..", "libexec", "sbin", "guacd")
+		if abs, err := filepath.Abs(candidate); err == nil {
+			if _, err := os.Stat(abs); err == nil {
+				return abs
+			}
+		}
+	}
+
+	// Check PATH
+	if path, err := exec.LookPath("guacd"); err == nil {
+		return path
+	}
+
+	return ""
+}
+
+// nativeProcess holds the running guacd subprocess so it can be stopped later.
+var nativeProcess *os.Process
+
+// StartNative launches guacd as a native subprocess in the foreground on the
+// given port. The process runs in the background and is tracked for cleanup.
+func StartNative(ctx context.Context, binaryPath string, port int) error {
+	cmd := exec.CommandContext(ctx, binaryPath, "-f", "-b", "127.0.0.1", "-l", fmt.Sprintf("%d", port))
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start native guacd: %w", err)
+	}
+	nativeProcess = cmd.Process
+	log.Printf("[guacd] started native binary (pid %d) on port %d", cmd.Process.Pid, port)
+
+	// Wait for it to be ready
+	deadline := time.After(10 * time.Second)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline:
+			return fmt.Errorf("timeout waiting for native guacd to become ready")
+		case <-ticker.C:
+			if IsListening() {
+				return nil
+			}
+		}
+	}
+}
+
+// StopNative kills the native guacd subprocess if one was started.
+func StopNative() {
+	if nativeProcess != nil {
+		_ = nativeProcess.Kill()
+		nativeProcess = nil
+	}
+}
+
+// EnsureRunning starts guacd if it's not already running. Tries in order:
+//  1. Already listening on DefaultAddr (externally managed)
+//  2. Native binary (Homebrew libexec or PATH)
+//  3. Docker container (with optional sharedDir bind mount)
 func EnsureRunning(ctx context.Context, sharedDir string) error {
 	if IsListening() && sharedDir == "" {
 		return nil
 	}
+
+	// Try native binary first (no sharedDir support for native yet)
+	if sharedDir == "" {
+		if bin := FindNativeBinary(); bin != "" {
+			log.Printf("[guacd] found native binary: %s", bin)
+			if err := StartNative(ctx, bin, DefaultPort); err == nil {
+				return nil
+			}
+			log.Printf("[guacd] native binary failed, falling back to Docker")
+		}
+	}
+
+	// Fall back to Docker
 	return Start(ctx, sharedDir)
 }
 
