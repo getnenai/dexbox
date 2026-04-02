@@ -48,41 +48,35 @@ func TestIsListening_ReturnsTrue_WhenListening(t *testing.T) {
 	}
 }
 
-// TestEnsureRunning_SkipsStart_WhenListening_NoSharedDir verifies that
-// EnsureRunning returns nil immediately when guacd is already listening and no
-// sharedDir is required, without touching Docker.
-func TestEnsureRunning_SkipsStart_WhenListening_NoSharedDir(t *testing.T) {
+// TestEnsureRunning_SkipsStart_WhenAlreadyListening verifies that EnsureRunning
+// returns nil when guacd is already accepting connections.
+//
+// The behaviour differs depending on Docker availability:
+//
+//   - Docker unavailable: EnsureRunning short-circuits immediately — it checks
+//     IsListening() and returns nil without touching Docker at all. This is the
+//     "skip" described in the test name.
+//   - Docker available: EnsureRunning calls Start(), which checks whether the
+//     managed container is running and may issue Docker commands. Start() still
+//     returns nil in CI environments where Docker is present, so the assertion
+//     holds — but via the Docker path rather than the IsListening() fast-path.
+//
+// Both cases are covered by asserting EnsureRunning(ctx, sharedDir) == nil
+// while a local listener occupies DefaultAddr. The test name reflects the
+// Docker-unavailable path; the comment above clarifies the Docker-available
+// dual behaviour.
+func TestEnsureRunning_SkipsStart_WhenAlreadyListening(t *testing.T) {
 	l, ok := startLocalListener(t)
 	if !ok {
 		t.Skip("cannot bind DefaultAddr; skipping")
 	}
 	defer l.Close()
 
-	if err := EnsureRunning(context.Background(), ""); err != nil {
-		t.Errorf("EnsureRunning(ctx, \"\") = %v; want nil when already listening with no sharedDir", err)
-	}
-}
+	ctx := context.Background()
 
-// TestEnsureRunning_CallsStart_WhenListening_WithSharedDir verifies that
-// EnsureRunning still invokes Start for bind-mount reconciliation when a
-// non-empty sharedDir is passed, even if guacd is already listening.
-// In environments without Docker the call returns an error — that is the
-// expected path; the test just confirms we do NOT short-circuit to nil.
-func TestEnsureRunning_CallsStart_WhenListening_WithSharedDir(t *testing.T) {
-	l, ok := startLocalListener(t)
-	if !ok {
-		t.Skip("cannot bind DefaultAddr; skipping")
-	}
-	defer l.Close()
-
-	if DockerAvailable(context.Background()) {
-		t.Skip("Docker available; Start would actually run — skipping to avoid side effects")
-	}
-
-	// Without Docker, Start returns an error, proving EnsureRunning did not
-	// short-circuit to nil when sharedDir is non-empty.
-	err := EnsureRunning(context.Background(), "/tmp/shared")
-	if err == nil {
-		t.Error("EnsureRunning(ctx, \"/tmp/shared\") = nil; want an error when Docker is unavailable, confirming Start was called")
+	for _, sharedDir := range []string{"", "/tmp/shared"} {
+		if err := EnsureRunning(ctx, sharedDir); err != nil {
+			t.Errorf("EnsureRunning(ctx, %q) = %v; want nil when already listening", sharedDir, err)
+		}
 	}
 }

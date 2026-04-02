@@ -35,20 +35,13 @@ func Start(ctx context.Context, sharedDir string) error {
 		return err
 	}
 	if running {
-		if sharedDir != "" && !containerHasMount(ctx, sharedDir) {
-			log.Printf("guacd: container %s is missing bind mount for %s; removing and recreating", ContainerName, sharedDir)
-			_ = run(ctx, "docker", "stop", ContainerName)
-			_ = run(ctx, "docker", "rm", "--force", ContainerName)
-			return createAndStart(ctx, sharedDir)
-		}
-		return nil
+		_, err := recreateIfMountMissing(ctx, sharedDir)
+		return err
 	}
 
 	if containerExists(ctx) {
-		if sharedDir != "" && !containerHasMount(ctx, sharedDir) {
-			log.Printf("guacd: container %s is missing bind mount for %s; removing and recreating", ContainerName, sharedDir)
-			_ = run(ctx, "docker", "rm", "--force", ContainerName)
-			return createAndStart(ctx, sharedDir)
+		if recreated, err := recreateIfMountMissing(ctx, sharedDir); recreated || err != nil {
+			return err
 		}
 		return startExisting(ctx)
 	}
@@ -56,14 +49,25 @@ func Start(ctx context.Context, sharedDir string) error {
 	return createAndStart(ctx, sharedDir)
 }
 
+// recreateIfMountMissing removes and recreates the guacd container when
+// sharedDir is required but the container lacks the bind mount.
+// Returns (true, nil) when the container was recreated, (false, nil) when
+// no action was needed, and (false, err) on failure.
+func recreateIfMountMissing(ctx context.Context, sharedDir string) (recreated bool, err error) {
+	if sharedDir == "" || containerHasMount(ctx, sharedDir) {
+		return false, nil
+	}
+	log.Printf("guacd: container %s is missing bind mount for %s; removing and recreating", ContainerName, sharedDir)
+	_ = run(ctx, "docker", "rm", "--force", ContainerName)
+	return true, createAndStart(ctx, sharedDir)
+}
+
 // Stop stops and removes the guacd container.
 func Stop(ctx context.Context) error {
 	if !containerExists(ctx) {
 		return nil
 	}
-	_ = run(ctx, "docker", "stop", ContainerName)
-	_ = run(ctx, "docker", "rm", "--force", ContainerName)
-	return nil
+	return run(ctx, "docker", "rm", "--force", ContainerName)
 }
 
 // IsRunning reports whether the guacd container is running.
@@ -158,8 +162,11 @@ func StopNative() {
 //  2. Native binary (Homebrew libexec or PATH)
 //  3. Docker container (with optional sharedDir bind mount)
 func EnsureRunning(ctx context.Context, sharedDir string) error {
-	if IsListening() && sharedDir == "" {
-		return nil
+	if !DockerAvailable(ctx) {
+		if IsListening() {
+			return nil
+		}
+		return fmt.Errorf("docker is not available and guacd is not listening on %s", DefaultAddr)
 	}
 
 	// Try native binary first (no sharedDir support for native yet)
