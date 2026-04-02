@@ -234,6 +234,7 @@ func TestRDP_buildGuacParams(t *testing.T) {
 				"width":            "1920",
 				"height":           "1080",
 				"security":         "any",
+				"client-name":      "Dexbox",
 				"disable-audio":    "true",
 				"enable-wallpaper": "false",
 			},
@@ -267,18 +268,18 @@ func TestRDP_buildGuacParams(t *testing.T) {
 			},
 		},
 		{
-			name: "DriveEnabled with empty DriveName defaults to guac-drive",
+			name: "DriveEnabled with empty DriveName defaults to Shared",
 			cfg:  withDrive(base, ""),
 			wantPresent: map[string]string{
-				"drive-name": "guac-drive",
+				"drive-name": "Shared",
 				"drive-path": "/guacd-shared",
 			},
 		},
 		{
-			name: "DriveEnabled with whitespace-only DriveName defaults to guac-drive",
+			name: "DriveEnabled with whitespace-only DriveName defaults to Shared",
 			cfg:  withDrive(base, "   "),
 			wantPresent: map[string]string{
-				"drive-name": "guac-drive",
+				"drive-name": "Shared",
 				"drive-path": "/guacd-shared",
 			},
 		},

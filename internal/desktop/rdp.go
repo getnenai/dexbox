@@ -75,6 +75,7 @@ func (r *BringRDP) buildGuacParams() map[string]string {
 		"width":            fmt.Sprintf("%d", r.config.Width),
 		"height":           fmt.Sprintf("%d", r.config.Height),
 		"security":         security,
+		"client-name":      "Dexbox",
 		"disable-audio":    "true",
 		"enable-wallpaper": "false",
 	}
@@ -84,7 +85,7 @@ func (r *BringRDP) buildGuacParams() map[string]string {
 	if r.config.DriveEnabled {
 		driveName := strings.TrimSpace(r.config.DriveName)
 		if driveName == "" {
-			driveName = "guac-drive"
+			driveName = "Shared"
 		}
 		params["drive-name"] = driveName
 		params["drive-path"] = "/guacd-shared"
