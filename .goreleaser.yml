@@ -26,3 +26,23 @@ release:
   github:
     owner: getnenai
     name: dexbox
+
+brews:
+  - repository:
+      owner: getnenai
+      name: homebrew-dexbox
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/getnenai/dexbox"
+    description: "Computer-use tool server for Windows VMs and RDP desktops"
+    license: "MIT"
+    install: |
+      bin.install "dexbox"
+    caveats: |
+      RDP desktop support requires Docker (for guacd).
+      VirtualBox VMs work without Docker.
+
+      Get started:
+        dexbox start
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/dexbox --version")
