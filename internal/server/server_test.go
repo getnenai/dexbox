@@ -90,9 +90,9 @@ func TestExecuteAction_VMDesktop(t *testing.T) {
 	injectSession(t, srv, vm)
 
 	action := &tools.CanonicalAction{
-		Tool: "computer",
+		Tool:   "computer",
+		Action: "left_click",
 		Params: map[string]any{
-			"action":     "left_click",
 			"coordinate": []any{float64(100), float64(200)},
 		},
 	}
@@ -125,9 +125,9 @@ func TestExecuteAction_RDPDesktop(t *testing.T) {
 	injectSession(t, srv, rdp)
 
 	action := &tools.CanonicalAction{
-		Tool: "computer",
+		Tool:   "computer",
+		Action: "left_click",
 		Params: map[string]any{
-			"action":     "left_click",
 			"coordinate": []any{float64(50), float64(75)},
 		},
 	}
@@ -155,10 +155,8 @@ func TestExecuteAction_RDPScreenshot(t *testing.T) {
 	injectSession(t, srv, rdp)
 
 	action := &tools.CanonicalAction{
-		Tool: "computer",
-		Params: map[string]any{
-			"action": "screenshot",
-		},
+		Tool:   "computer",
+		Action: "screenshot",
 	}
 
 	req := httptest.NewRequest("POST", "/actions?desktop=test-rdp", nil)
@@ -178,10 +176,10 @@ func TestExecuteAction_RDPTypeText(t *testing.T) {
 	injectSession(t, srv, rdp)
 
 	action := &tools.CanonicalAction{
-		Tool: "computer",
+		Tool:   "computer",
+		Action: "type",
 		Params: map[string]any{
-			"action": "type",
-			"text":   "hello rdp",
+			"text": "hello rdp",
 		},
 	}
 
