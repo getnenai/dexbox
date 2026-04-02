@@ -14,10 +14,10 @@ metadata:
               "kind": "go",
               "package": "github.com/getnenai/dexbox/cmd/dexbox@latest",
               "bins": ["dexbox"],
-              "label": "Install dexbox via go install",
-            },
-          ],
-      },
+              "label": "Install dexbox via go install"
+            }
+          ]
+      }
   }
 ---
 
