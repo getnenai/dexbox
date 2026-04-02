@@ -1,6 +1,6 @@
 .PHONY: all test build-cli install install-cli go-install lint clean help
 .PHONY: agent-py-lc-install agent-py-lc-run agent-py-lc-lint agent-ts-vercel-install agent-ts-vercel-run
-.PHONY: extend-parse-ts extend-parse-py
+.PHONY: extend-parse-ts extend-parse-py dexbox-run
 
 all: install-cli ## Default target (build + install to ~/.local/bin)
 
@@ -31,6 +31,9 @@ lint: ## Run go vet on Go sources
 
 clean: ## Remove build artifacts
 	rm -rf bin/ dist/ build/
+
+dexbox-run: build-cli ## Build and run dexbox (ARGS=... to pass flags, e.g. ARGS="run --type computer --action screenshot")
+	./bin/dexbox $(ARGS)
 
 # --- Python LangChain Agent (uv) ---
 

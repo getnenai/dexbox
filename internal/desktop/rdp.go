@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/deluan/bring"
+
+	"github.com/getnenai/dexbox/internal/guacd"
 )
 
 // Type aliases so the Client interface doesn't leak bring's concrete types.
@@ -88,7 +90,7 @@ func (r *BringRDP) buildGuacParams() map[string]string {
 			driveName = "Shared"
 		}
 		params["drive-name"] = driveName
-		params["drive-path"] = "/guacd-shared"
+		params["drive-path"] = guacd.ContainerMount
 	}
 	return params
 }

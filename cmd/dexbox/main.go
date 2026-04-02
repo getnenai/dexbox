@@ -97,30 +97,54 @@ func cmdStart() *cobra.Command {
 		Short: "Start dexbox server, vboxwebsrv, and guacd",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			port := parseSoapPort()
+			ctx := context.Background()
 
-			// Run vboxwebsrv as a foreground child so Go owns the real PID
-			// and can kill it reliably on shutdown.
-			fmt.Println("Starting vboxwebsrv...")
-			vboxwebsrv := exec.Command("vboxwebsrv", "--host", "localhost", "--port", port)
-			vboxwebsrv.Stdout = os.Stdout
-			vboxwebsrv.Stderr = os.Stderr
-			if err := vboxwebsrv.Start(); err != nil {
-				return fmt.Errorf("failed to start vboxwebsrv: %w", err)
+			// Record our PID so `dexbox stop` can target this process directly.
+			if err := writePIDFile(dexboxPIDFile); err != nil {
+				fmt.Printf("Warning: could not write PID file: %v\n", err)
+			} else {
+				defer os.Remove(dexboxPIDFile)
 			}
 
-			// Poll until vboxwebsrv is actually listening.
-			if err := waitForPort(port, 10*time.Second); err != nil {
-				_ = vboxwebsrv.Process.Kill()
-				return fmt.Errorf("vboxwebsrv failed to start: %w", err)
+			// vboxwebsrv is optional — skip gracefully when VirtualBox is not
+			// installed (e.g. QEMU-only environments).
+			var vboxwebsrv *exec.Cmd
+			vboxDied := make(chan error, 1)
+			stopVBox := func() {}
+
+			if _, err := exec.LookPath("vboxwebsrv"); err == nil {
+				fmt.Println("Starting vboxwebsrv...")
+				vboxwebsrv = exec.Command("vboxwebsrv", "--host", "localhost", "--port", port)
+				vboxwebsrv.Stdout = os.Stdout
+				vboxwebsrv.Stderr = os.Stderr
+				if err := vboxwebsrv.Start(); err != nil {
+					return fmt.Errorf("failed to start vboxwebsrv: %w", err)
+				}
+				if err := waitForPort(port, 10*time.Second); err != nil {
+					_ = vboxwebsrv.Process.Kill()
+					return fmt.Errorf("vboxwebsrv failed to start: %w", err)
+				}
+				go func() { vboxDied <- vboxwebsrv.Wait() }()
+				stopVBox = func() {
+					_ = vboxwebsrv.Process.Signal(syscall.SIGTERM)
+					select {
+					case <-vboxDied:
+					case <-time.After(5 * time.Second):
+						_ = vboxwebsrv.Process.Kill()
+					}
+				}
+			} else {
+				fmt.Println("vboxwebsrv not found — skipping (VirtualBox VMs disabled, RDP still available)")
+				// Keep vboxDied permanently open so the select below never fires on it.
+				// We never send on it, so it blocks forever.
 			}
 
 			// Start guacd (Docker) for RDP support
-			ctx := context.Background()
 			if guacd.DockerAvailable(ctx) {
 				fmt.Println("Starting guacd...")
-				if err := guacd.Start(ctx); err != nil {
+				if err := guacd.Start(ctx, config.SharedDir); err != nil {
 					fmt.Printf("Warning: failed to start guacd: %v\n", err)
-					fmt.Println("RDP connections will not be available. VMs still work.")
+					fmt.Println("RDP connections will not be available.")
 				} else {
 					fmt.Println("guacd running on port 4822")
 				}
@@ -139,30 +163,11 @@ func cmdStart() *cobra.Command {
 				SharedDir:  config.SharedDir,
 			})
 
-			// Handle shutdown signals
 			sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 
 			errCh := make(chan error, 1)
-			go func() {
-				errCh <- srv.Run()
-			}()
-
-			// Detect if vboxwebsrv dies while we're running.
-			vboxDied := make(chan error, 1)
-			go func() {
-				vboxDied <- vboxwebsrv.Wait()
-			}()
-
-			// Helper to shut down vboxwebsrv gracefully with a timeout.
-			stopVBox := func() {
-				_ = vboxwebsrv.Process.Signal(syscall.SIGTERM)
-				select {
-				case <-vboxDied:
-				case <-time.After(5 * time.Second):
-					_ = vboxwebsrv.Process.Kill()
-				}
-			}
+			go func() { errCh <- srv.Run() }()
 
 			select {
 			case err := <-errCh:
@@ -196,19 +201,29 @@ func cmdStop() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 
+			fmt.Println("Stopping dexbox server...")
+			if !stopByPIDFile() {
+				// Fall back when PID file is missing or stale.
+				_ = exec.Command("pkill", "-f", "dexbox start").Run()
+				deadline := time.Now().Add(5 * time.Second)
+				for time.Now().Before(deadline) {
+					if exec.Command("pgrep", "-f", "dexbox start").Run() != nil {
+						break
+					}
+					time.Sleep(500 * time.Millisecond)
+				}
+				_ = exec.Command("pkill", "-9", "-f", "dexbox start").Run()
+			}
+
 			fmt.Println("Stopping vboxwebsrv...")
 			_ = exec.Command("pkill", "-f", "vboxwebsrv").Run()
-
-			// Verify the process actually died.
-			deadline := time.Now().Add(5 * time.Second)
-			for time.Now().Before(deadline) {
+			vboxDeadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(vboxDeadline) {
 				if exec.Command("pgrep", "-f", "vboxwebsrv").Run() != nil {
 					break
 				}
 				time.Sleep(500 * time.Millisecond)
 			}
-
-			// Force kill if still alive.
 			_ = exec.Command("pkill", "-9", "-f", "vboxwebsrv").Run()
 
 			fmt.Println("Stopping guacd...")
@@ -241,6 +256,55 @@ func waitForPort(port string, timeout time.Duration) error {
 		time.Sleep(200 * time.Millisecond)
 	}
 	return fmt.Errorf("port %s not ready after %s", port, timeout)
+}
+
+// ---------------------------------------------------------------------------
+// PID file helpers
+// ---------------------------------------------------------------------------
+
+const dexboxPIDFile = "/tmp/dexbox.pid"
+
+// writePIDFile writes the current process PID to path.
+func writePIDFile(path string) error {
+	return os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+}
+
+// stopByPIDFile reads the PID file, sends SIGTERM to the recorded process,
+// waits up to 5 seconds for it to exit, then escalates to SIGKILL.
+// Returns true if the process was found and signalled; false when the PID
+// file is absent, unreadable, or the recorded PID is already gone.
+func stopByPIDFile() bool {
+	data, err := os.ReadFile(dexboxPIDFile)
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// Signal 0 checks liveness without actually signalling the process.
+	if proc.Signal(syscall.Signal(0)) != nil {
+		_ = os.Remove(dexboxPIDFile)
+		return false
+	}
+	_ = proc.Signal(syscall.SIGTERM)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if proc.Signal(syscall.Signal(0)) != nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	// Escalate if still alive after the grace period.
+	if proc.Signal(syscall.Signal(0)) == nil {
+		_ = proc.Kill()
+	}
+	_ = os.Remove(dexboxPIDFile)
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +382,7 @@ func newDesktopManager() (*desktop.Manager, error) {
 		vbox.NewManager(config.SOAPAddr, config.VMUser, config.VMPass),
 		store,
 		guacd.DefaultAddr,
+		config.SharedDir,
 	), nil
 }
 
@@ -716,6 +781,7 @@ func cmdRDPAdd() *cobra.Command {
 		height     int
 		ignoreCert bool
 		security   string
+		driveName  string
 	)
 
 	c := &cobra.Command{
@@ -750,6 +816,10 @@ Example:
 				IgnoreCert: ignoreCert,
 				Security:   security,
 			}
+			if driveName != "" {
+				cfg.DriveEnabled = true
+				cfg.DriveName = driveName
+			}
 
 			if err := store.Add(name, cfg); err != nil {
 				return err
@@ -771,6 +841,7 @@ Example:
 	c.Flags().IntVar(&height, "height", 768, "Display height in pixels")
 	c.Flags().BoolVar(&ignoreCert, "ignore-cert", true, "Ignore certificate validation")
 	c.Flags().StringVar(&security, "security", "", "RDP security mode: any (default), rdp, nla, tls (use rdp for VirtualBox VRDE)")
+	c.Flags().StringVar(&driveName, "drive-name", "", "Enable drive redirection with this Windows share name (e.g. MyDrive)")
 	_ = c.MarkFlagRequired("host")
 	_ = c.MarkFlagRequired("user")
 	_ = c.MarkFlagRequired("pass")

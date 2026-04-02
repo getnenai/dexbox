@@ -15,6 +15,7 @@ import (
 	"github.com/wwt/guac"
 
 	"github.com/getnenai/dexbox/internal/desktop"
+	"github.com/getnenai/dexbox/internal/guacd"
 )
 
 //go:embed static/viewer.html
@@ -99,7 +100,7 @@ func serveTunnel(w http.ResponseWriter, r *http.Request, name string, mgr *deskt
 		if security == "" {
 			security = "any"
 		}
-		config.Parameters = map[string]string{
+		params := map[string]string{
 			"hostname":         cfg.Host,
 			"port":             fmt.Sprintf("%d", cfg.Port),
 			"username":         cfg.Username,
@@ -109,6 +110,17 @@ func serveTunnel(w http.ResponseWriter, r *http.Request, name string, mgr *deskt
 			"disable-audio":    "true",
 			"enable-wallpaper": "false",
 		}
+		if cfg.DriveEnabled {
+			driveName := strings.TrimSpace(cfg.DriveName)
+			if driveName == "" {
+				driveName = "Shared"
+			}
+			params["enable-drive"] = "true"
+			params["drive-name"] = driveName
+			params["drive-path"] = guacd.ContainerMount
+			params["create-drive-path"] = "true"
+		}
+		config.Parameters = params
 		config.OptimalScreenWidth = cfg.Width
 		config.OptimalScreenHeight = cfg.Height
 		config.ImageMimetypes = []string{"image/png", "image/jpeg"}

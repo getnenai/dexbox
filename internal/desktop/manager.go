@@ -39,6 +39,7 @@ type Manager struct {
 	vbox      *vbox.Manager
 	store     *ConnectionStore
 	guacdAddr string
+	sharedDir string
 
 	sessions map[string]Desktop
 	mu       sync.Mutex
@@ -48,11 +49,12 @@ type Manager struct {
 }
 
 // NewManager creates a unified desktop manager.
-func NewManager(vboxMgr *vbox.Manager, store *ConnectionStore, guacdAddr string) *Manager {
+func NewManager(vboxMgr *vbox.Manager, store *ConnectionStore, guacdAddr string, sharedDir string) *Manager {
 	return &Manager{
 		vbox:      vboxMgr,
 		store:     store,
 		guacdAddr: guacdAddr,
+		sharedDir: sharedDir,
 		sessions:  make(map[string]Desktop),
 		subs:      make(map[string][]chan SessionEvent),
 	}
@@ -101,7 +103,7 @@ func (m *Manager) Up(ctx context.Context, name string) error {
 		return fmt.Errorf("desktop %q not found (not a VM and not an RDP connection)", name)
 	}
 
-	if err := guacd.EnsureRunning(ctx); err != nil {
+	if err := guacd.EnsureRunning(ctx, m.sharedDir); err != nil {
 		return fmt.Errorf("guacd required for RDP: %w", err)
 	}
 
