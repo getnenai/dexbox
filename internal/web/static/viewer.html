@@ -16,10 +16,20 @@
     #status.connected { color: #4f4; }
     #status.readonly { color: #fa0; }
     #status.error { color: #f44; }
+    #reload-btn {
+      display: none;
+      position: fixed; top: 34px; right: 12px;
+      font: 13px/1 monospace; color: #f44;
+      background: rgba(0,0,0,0.6); padding: 4px 8px;
+      border-radius: 4px; z-index: 10;
+      border: 1px solid #f44; cursor: pointer;
+    }
+    #reload-btn:hover { background: rgba(180,0,0,0.4); }
   </style>
 </head>
 <body>
   <div id="status">connecting...</div>
+  <button id="reload-btn" onclick="location.reload()">reload</button>
   <div id="display"></div>
 
   <!-- Apache Guacamole client JS (Apache-2.0) -->
@@ -41,6 +51,7 @@
 
       const display = document.getElementById('display');
       const statusEl = document.getElementById('status');
+      const reloadBtn = document.getElementById('reload-btn');
 
       // Build base URL parts
       const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -53,6 +64,25 @@
       var keyboard = null; // created once; lives for the page lifetime
       var reconnectTimer = null;
       var currentResizeHandler = null;
+      var retryDelay = 2000; // ms; doubles on each failed attempt, capped at 30 s
+      var retryCount = 0;
+      var MAX_RETRIES = 10;
+
+      // scheduleReconnect is the primary entry point for reconnect attempts.
+      // It cancels any pending timer, advances the back-off, and schedules a
+      // fresh connectTunnel call. Both onstatechange (case 5) and onerror route
+      // through here so reconnectTimer is never double-scheduled. The
+      // agent_disconnected SSE path still uses a direct 1 s setTimeout because
+      // it is a planned mode transition, not an error recovery.
+      function scheduleReconnect(reason) { // eslint-disable-line no-unused-vars
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        var delay = retryDelay;
+        retryDelay = Math.min(retryDelay * 2, 30000);
+        reconnectTimer = setTimeout(function() {
+          reconnectTimer = null;
+          connectTunnel(isReadonly);
+        }, delay);
+      }
 
       function connectTunnel(readonly) {
         isReadonly = readonly;
@@ -84,6 +114,9 @@
             case 1: statusEl.textContent = 'connecting...'; statusEl.className = ''; break;
             case 2: statusEl.textContent = 'waiting...'; statusEl.className = ''; break;
             case 3:
+              retryDelay = 2000; // reset backoff on successful connect
+              retryCount = 0;
+              reloadBtn.style.display = 'none';
               if (readonly) {
                 statusEl.textContent = 'watching (agent active)';
                 statusEl.className = 'readonly';
@@ -99,15 +132,30 @@
               statusEl.className = '';
               break;
             case 5:
-              statusEl.textContent = 'disconnected';
+              statusEl.textContent = 'disconnected — reconnecting…';
               statusEl.className = 'error';
+              statusEl.style.opacity = '1';
+              scheduleReconnect(null);
               break;
           }
         };
 
         currentClient.onerror = function(error) {
-          statusEl.textContent = 'error: ' + (error.message || 'unknown');
+          var msg = (error && error.message) ? error.message : 'unknown';
+          retryCount++;
+
+          if (retryCount > MAX_RETRIES) {
+            statusEl.textContent = 'connection failed';
+            statusEl.className = 'error';
+            statusEl.style.opacity = '1';
+            reloadBtn.style.display = 'block';
+            return;
+          }
+
+          statusEl.textContent = 'waiting for server… (' + msg + ')';
           statusEl.className = 'error';
+          statusEl.style.opacity = '1';
+          scheduleReconnect(msg);
         };
 
         if (!readonly) {
@@ -145,10 +193,14 @@
         window.addEventListener('resize', resize);
       }
 
-      // Start in interactive mode; SSE will switch to read-only if agent is active.
-      connectTunnel(false);
+      // Subscribe to agent session events via SSE first, then connect the
+      // tunnel in the correct mode based on the initial state.  Deferring
+      // the tunnel connection until the first SSE message arrives prevents
+      // the race where the viewer creates a competing RDP session before it
+      // learns that the agent is already active.
+      statusEl.textContent = 'connecting...';
+      var tunnelStarted = false;
 
-      // Subscribe to agent session events via SSE.
       var evtSource = new EventSource(eventsUrl);
 
       evtSource.onmessage = function(e) {
@@ -158,33 +210,39 @@
         }
 
         if (e.data === 'agent_connected') {
-          // Agent took over — join its guacd session read-only.
-          if (!isReadonly) {
+          if (!tunnelStarted) {
+            tunnelStarted = true;
+            connectTunnel(true);
+          } else if (!isReadonly) {
+            // Agent took over while we were in interactive mode — rejoin read-only.
             connectTunnel(true);
           }
         } else if (e.data === 'agent_disconnected') {
-          // Agent disconnected — reconnect interactive within 3s so the
-          // browser viewer can take over without a noticeable gap.
-          if (isReadonly) {
+          if (!tunnelStarted) {
+            tunnelStarted = true;
+            connectTunnel(false);
+          } else if (isReadonly) {
+            // Agent released control — reconnect interactive within 1 s.
             reconnectTimer = setTimeout(function() {
               reconnectTimer = null;
               connectTunnel(false);
-            }, 3000);
+            }, 1000);
           }
         }
       };
 
       evtSource.onerror = function() {
-        statusEl.textContent = 'reconnecting...';
-        statusEl.className = '';
-        statusEl.style.opacity = '1';
+        if (!tunnelStarted) {
+          statusEl.textContent = 'SSE reconnecting...';
+          statusEl.className = '';
+          statusEl.style.opacity = '1';
+        }
       };
 
       evtSource.onopen = function() {
-        // SSE reconnected — the next onmessage will set the correct state.
-        // Clear any "reconnecting..." banner left by onerror.
-        if (statusEl.textContent === 'reconnecting...') {
-          statusEl.textContent = '';
+        // SSE reconnected — next onmessage will re-establish the correct mode.
+        if (!tunnelStarted) {
+          statusEl.textContent = 'connecting...';
           statusEl.className = '';
         }
       };

@@ -2,7 +2,9 @@ package desktop
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -10,6 +12,14 @@ import (
 	"github.com/getnenai/dexbox/internal/guacd"
 	"github.com/getnenai/dexbox/internal/vbox"
 )
+
+// ErrDesktopNotFound is returned by EnsureRDPConnected when the named desktop
+// has no stored RDP configuration. Callers can detect it with errors.Is to
+// distinguish "config missing" (→ 404) from "connection failed" (→ 503).
+// It is never returned proactively — only when a caller explicitly requests a
+// named desktop that does not exist. If no RDP connections are configured,
+// this error is never triggered.
+var ErrDesktopNotFound = errors.New("desktop not found")
 
 // SessionEventType indicates whether an agent connected or disconnected.
 type SessionEventType int
@@ -46,17 +56,24 @@ type Manager struct {
 
 	subs   map[string][]chan SessionEvent
 	subsMu sync.Mutex
+
+	// Viewer ref-counting for idle-disconnect.
+	viewerCount map[string]int
+	idleTimers  map[string]idleTimer
+	viewerMu    sync.Mutex
 }
 
 // NewManager creates a unified desktop manager.
 func NewManager(vboxMgr *vbox.Manager, store *ConnectionStore, guacdAddr string, sharedDir string) *Manager {
 	return &Manager{
-		vbox:      vboxMgr,
-		store:     store,
-		guacdAddr: guacdAddr,
-		sharedDir: sharedDir,
-		sessions:  make(map[string]Desktop),
-		subs:      make(map[string][]chan SessionEvent),
+		vbox:        vboxMgr,
+		store:       store,
+		guacdAddr:   guacdAddr,
+		sharedDir:   sharedDir,
+		sessions:    make(map[string]Desktop),
+		subs:        make(map[string][]chan SessionEvent),
+		viewerCount: make(map[string]int),
+		idleTimers:  make(map[string]idleTimer),
 	}
 }
 
@@ -70,51 +87,59 @@ func (m *Manager) Store() *ConnectionStore {
 	return m.store
 }
 
-// Up brings a desktop online. For VMs: boots if needed + connects SOAP.
-// For RDP: verifies guacd is running and the target is reachable.
+// Up brings a desktop online and, for RDP connections, claims agent control.
 //
-// RDP sessions are ephemeral — each tool invocation (dexbox run) connects
-// on demand. Up just confirms the target is reachable so that subsequent
-// tool calls succeed. The in-memory session is used when Up is called from
-// within the same process (e.g. dexbox run, which calls Up then uses the
-// session immediately before the process exits).
+// For VMs: boots if needed and registers the session.
+// For RDP: ensures a live guacd session exists (connecting on demand if needed),
+// then marks the session as agent-active so the web viewer switches to read-only.
 func (m *Manager) Up(ctx context.Context, name string) error {
-	m.mu.Lock()
-	if _, ok := m.sessions[name]; ok {
-		m.mu.Unlock()
-		return nil // already connected within this process
-	}
-	// Keep lock held during connection setup to prevent races
-	defer m.mu.Unlock()
-
-	// Try as VM first
+	// --- VM path ---
 	if vbox.VMExists(ctx, name) {
+		m.mu.Lock()
+		if _, ok := m.sessions[name]; ok {
+			m.mu.Unlock()
+			return nil // already up
+		}
+		m.mu.Unlock()
+
 		if err := m.vbox.Start(ctx, name); err != nil {
 			return err
 		}
 		d := NewVBox(name, m.vbox)
+		m.mu.Lock()
 		m.sessions[name] = d
+		m.mu.Unlock()
 		return nil
 	}
 
-	// Try as RDP connection
-	cfg, ok := m.store.Get(name)
-	if !ok {
+	// --- RDP path ---
+	if _, ok := m.store.Get(name); !ok {
 		return fmt.Errorf("desktop %q not found (not a VM and not an RDP connection)", name)
 	}
 
-	if err := guacd.EnsureRunning(ctx, m.sharedDir); err != nil {
-		return fmt.Errorf("guacd required for RDP: %w", err)
-	}
-
-	d := NewBringRDP(name, cfg, m.guacdAddr)
-	if err := d.Connect(ctx); err != nil {
+	// Connect on demand if not already live.
+	if err := m.EnsureRDPConnected(ctx, name); err != nil {
 		return err
 	}
 
-	// m.mu is already held (acquired at entry, released via defer).
-	// The VM path above stores its session the same way.
-	m.sessions[name] = d
+	m.mu.Lock()
+	rdp, _ := m.sessions[name].(*BringRDP)
+	m.mu.Unlock()
+
+	if rdp == nil {
+		return fmt.Errorf("desktop %q: session not available after connect", name)
+	}
+
+	rdp.SetAgentActive(true)
+
+	// Cancel any pending idle-disconnect since an agent is now active.
+	m.viewerMu.Lock()
+	if it, ok := m.idleTimers[name]; ok {
+		it.timer.Stop()
+		delete(m.idleTimers, name)
+	}
+	m.viewerMu.Unlock()
+
 	m.notify(name, SessionUp)
 	return nil
 }
@@ -129,7 +154,7 @@ func rdpReachable(host string, port int) bool {
 		candidates = append(candidates, "localhost")
 	}
 	for _, h := range candidates {
-		addr := fmt.Sprintf("%s:%d", h, port)
+		addr := net.JoinHostPort(h, fmt.Sprintf("%d", port))
 		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 		if err == nil {
 			conn.Close()
@@ -139,20 +164,44 @@ func rdpReachable(host string, port int) bool {
 	return false
 }
 
-// Down disconnects a desktop session. If shutdown is true and the desktop is a
-// VM, it also powers off the VM (ACPI or force).
+// Down releases agent control of a desktop.
+//
+// For RDP: clears the agent-active flag and fires SessionDown so the web
+// viewer regains interactive control. The underlying guacd/RDP connection is
+// kept alive — only explicit server shutdown (DownAll) tears it down.
+//
+// For VMs: disconnects and removes the session. If shutdown is true, also
+// powers off the VM.
 func (m *Manager) Down(ctx context.Context, name string, shutdown bool, force bool) error {
 	m.mu.Lock()
 	d, ok := m.sessions[name]
-	if ok {
-		delete(m.sessions, name)
-	}
 	m.mu.Unlock()
 
 	if ok {
-		_ = d.Disconnect()
 		if d.Type() == "rdp" {
+			if rdp, isBringRDP := d.(*BringRDP); isBringRDP {
+				// Persistent RDP session: release agent control but keep the
+				// guacd connection alive so the web viewer can rejoin.
+				rdp.SetAgentActive(false)
+				// Schedule an idle disconnect if no viewers are watching.
+				// We call scheduleIdleDisconnectIfIdle directly rather than
+				// ViewerDisconnected because no viewer actually left — only
+				// the agent released control.
+				m.scheduleIdleDisconnectIfIdle(name)
+			} else {
+				// Non-persistent RDP (e.g. test double): disconnect and remove.
+				m.mu.Lock()
+				delete(m.sessions, name)
+				m.mu.Unlock()
+				_ = d.Disconnect()
+			}
 			m.notify(name, SessionDown)
+		} else {
+			// VM: disconnect and remove from sessions.
+			m.mu.Lock()
+			delete(m.sessions, name)
+			m.mu.Unlock()
+			_ = d.Disconnect()
 		}
 	}
 
@@ -160,7 +209,7 @@ func (m *Manager) Down(ctx context.Context, name string, shutdown bool, force bo
 		return nil
 	}
 
-	// Shutdown is VM-only
+	// Shutdown is VM-only.
 	if !vbox.VMExists(ctx, name) {
 		if ok && d.Type() == "rdp" {
 			return fmt.Errorf("cannot shutdown an RDP target; use 'down' to disconnect")
@@ -175,6 +224,7 @@ func (m *Manager) Down(ctx context.Context, name string, shutdown bool, force bo
 }
 
 // DownAll disconnects all sessions, shuts down all running VMs, and stops guacd.
+// Unlike Down, this fully tears down RDP connections (used on server shutdown).
 func (m *Manager) DownAll(ctx context.Context, force bool) error {
 	m.mu.Lock()
 	sessions := make(map[string]Desktop, len(m.sessions))
@@ -184,8 +234,25 @@ func (m *Manager) DownAll(ctx context.Context, force bool) error {
 	m.sessions = make(map[string]Desktop)
 	m.mu.Unlock()
 
-	// Disconnect all sessions
+	// Cancel all pending idle-disconnect timers so they don't fire after
+	// shutdown. Drain and clear the map under viewerMu, then stop each timer
+	// outside the lock.
+	m.viewerMu.Lock()
+	pendingTimers := make([]idleTimer, 0, len(m.idleTimers))
+	for _, it := range m.idleTimers {
+		pendingTimers = append(pendingTimers, it)
+	}
+	m.idleTimers = make(map[string]idleTimer)
+	m.viewerMu.Unlock()
+	for _, it := range pendingTimers {
+		it.timer.Stop()
+	}
+
+	// Fully disconnect all sessions (including RDP).
 	for name, d := range sessions {
+		if rdp, ok := d.(*BringRDP); ok {
+			rdp.SetAgentActive(false)
+		}
 		_ = d.Disconnect()
 		if d.Type() == "rdp" {
 			m.notify(name, SessionDown)
@@ -252,9 +319,185 @@ func (m *Manager) Subscribe(name string) (<-chan SessionEvent, func()) {
 	return ch, cancel
 }
 
-// ActiveRDP returns the active *BringRDP session for the named desktop, if any.
-// Only returns a session whose Connected() method reports true; a session that
-// lost its guacd connection without an explicit Down() call is excluded.
+// EnsureRDPConnected connects the named RDP desktop to guacd if a live session
+// does not already exist. It is called on first use — either by the web viewer
+// opening a tunnel or by Up() when the session is not yet live.
+// Callers that need the connection ID should read it after this returns.
+func (m *Manager) EnsureRDPConnected(ctx context.Context, name string) error {
+	// Fast path: already connected.
+	if rdp, ok := m.ActiveRDP(name); ok && rdp.GuacdConnectionID() != "" {
+		return nil
+	}
+
+	cfg, ok := m.store.Get(name)
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrDesktopNotFound, name)
+	}
+
+	if err := guacd.EnsureRunning(ctx, m.sharedDir); err != nil {
+		return fmt.Errorf("guacd required for RDP: %w", err)
+	}
+
+	// Acquire the lock to do an authoritative check-and-reserve. If another
+	// goroutine already connected while we were starting guacd, use that
+	// session. Otherwise, store the new BringRDP under the lock so no second
+	// goroutine can also proceed to Connect().
+	m.mu.Lock()
+	if existing, exists := m.sessions[name]; exists {
+		if rdp, ok := existing.(*BringRDP); ok && rdp.Connected() {
+			m.mu.Unlock()
+			return nil
+		}
+	}
+	d := NewBringRDP(name, cfg, m.guacdAddr)
+	m.sessions[name] = d
+	m.mu.Unlock()
+
+	if err := d.Connect(ctx); err != nil {
+		m.mu.Lock()
+		// Only remove our entry; a concurrent goroutine might have replaced it.
+		if m.sessions[name] == d {
+			delete(m.sessions, name)
+		}
+		m.mu.Unlock()
+		return err
+	}
+
+	log.Printf("[manager] connected %s (on-demand), connID=%s", name, d.GuacdConnectionID())
+	return nil
+}
+
+// idleTimer pairs the time.Timer with the *BringRDP session it was created
+// for. disconnectIdle uses this to guard against a TOCTOU where a new session
+// is created between the timer being scheduled and it firing: if the current
+// session pointer no longer matches, the timer is a no-op for the new session.
+type idleTimer struct {
+	timer   *time.Timer
+	session *BringRDP
+}
+
+const idleDisconnectDelay = 30 * time.Second
+
+// ViewerConnected is called when a web viewer successfully opens a tunnel for
+// the named desktop. It increments the viewer ref-count and cancels any pending
+// idle-disconnect timer.
+func (m *Manager) ViewerConnected(name string) {
+	m.viewerMu.Lock()
+	defer m.viewerMu.Unlock()
+
+	m.viewerCount[name]++
+	if it, ok := m.idleTimers[name]; ok {
+		it.timer.Stop()
+		delete(m.idleTimers, name)
+	}
+	log.Printf("[manager] viewer connected %s (viewers=%d)", name, m.viewerCount[name])
+}
+
+// ViewerDisconnected is called when a web viewer's tunnel closes. It decrements
+// the viewer ref-count; if no viewers remain and no agent is active, it
+// schedules a disconnect after idleDisconnectDelay.
+func (m *Manager) ViewerDisconnected(name string) {
+	m.viewerMu.Lock()
+	if m.viewerCount[name] > 0 {
+		m.viewerCount[name]--
+	}
+	count := m.viewerCount[name]
+	log.Printf("[manager] viewer disconnected %s (viewers=%d)", name, count)
+	m.viewerMu.Unlock()
+
+	if count > 0 {
+		return
+	}
+	m.scheduleIdleDisconnectIfIdle(name)
+}
+
+// scheduleIdleDisconnectIfIdle schedules an idle disconnect for the named
+// desktop if no viewers are connected and no agent is active. It is called by
+// ViewerDisconnected (after viewer count reaches zero) and by Down (after the
+// agent releases a persistent RDP session). Separating it from
+// ViewerDisconnected avoids confusing "viewer disconnected" semantics in the
+// Down path.
+func (m *Manager) scheduleIdleDisconnectIfIdle(name string) {
+	// Check agent status without holding viewerMu to avoid a viewerMu→mu
+	// lock-ordering dependency (IsAgentActive acquires mu).
+	if m.IsAgentActive(name) {
+		return
+	}
+
+	// Capture the current session pointer so disconnectIdle can guard against
+	// a TOCTOU where a new session is established before the timer fires.
+	m.mu.Lock()
+	var rdpSession *BringRDP
+	if d, ok := m.sessions[name]; ok {
+		rdpSession, _ = d.(*BringRDP)
+	}
+	m.mu.Unlock()
+
+	// Re-check viewer count and any existing timer under viewerMu. Agent state
+	// is not re-checked here — disconnectIdle always re-checks before acting,
+	// so a spuriously scheduled timer is harmless.
+	m.viewerMu.Lock()
+	defer m.viewerMu.Unlock()
+
+	if m.viewerCount[name] > 0 {
+		return
+	}
+	if _, pending := m.idleTimers[name]; pending {
+		return
+	}
+	log.Printf("[manager] scheduling idle disconnect for %s in %v", name, idleDisconnectDelay)
+	session := rdpSession
+	m.idleTimers[name] = idleTimer{
+		timer: time.AfterFunc(idleDisconnectDelay, func() {
+			m.disconnectIdle(name)
+		}),
+		session: session,
+	}
+}
+
+// disconnectIdle tears down the RDP connection for a desktop that has had no
+// viewers and no active agent for idleDisconnectDelay.
+// It guards against a TOCTOU by comparing the session pointer stored in the
+// idleTimer against the current session: if a new session was established
+// between scheduling and firing, the pointers differ and we do nothing.
+func (m *Manager) disconnectIdle(name string) {
+	m.viewerMu.Lock()
+	it, ok := m.idleTimers[name]
+	if !ok {
+		m.viewerMu.Unlock()
+		return
+	}
+	delete(m.idleTimers, name)
+	count := m.viewerCount[name]
+	m.viewerMu.Unlock()
+
+	if count > 0 || m.IsAgentActive(name) {
+		log.Printf("[manager] idle-disconnect cancelled for %s (still in use)", name)
+		return
+	}
+
+	if it.session == nil {
+		return
+	}
+
+	m.mu.Lock()
+	d, ok := m.sessions[name]
+	// Identity check: only disconnect if the current session is the same
+	// instance the timer was created for. A new session created between
+	// scheduling and firing will have a different pointer.
+	if !ok || d != it.session {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.sessions, name)
+	m.mu.Unlock()
+	_ = it.session.Disconnect()
+	log.Printf("[manager] idle-disconnected %s", name)
+}
+
+// ActiveRDP returns the *BringRDP for a desktop whose guacd session is live,
+// regardless of whether an agent has claimed control. Used by the web viewer
+// to obtain the connection ID for joining the session.
 func (m *Manager) ActiveRDP(name string) (*BringRDP, bool) {
 	m.mu.Lock()
 	d, ok := m.sessions[name]
@@ -267,6 +510,23 @@ func (m *Manager) ActiveRDP(name string) (*BringRDP, bool) {
 		return nil, false
 	}
 	return r, true
+}
+
+// IsAgentActive reports whether an agent has claimed control of the named
+// desktop via Up(). Used to determine whether the web viewer should join
+// in read-only mode.
+func (m *Manager) IsAgentActive(name string) bool {
+	m.mu.Lock()
+	d, ok := m.sessions[name]
+	m.mu.Unlock()
+	if !ok {
+		return false
+	}
+	r, ok := d.(*BringRDP)
+	if !ok {
+		return false
+	}
+	return r.AgentActive()
 }
 
 // RDPConfig returns the stored connection configuration for the named RDP desktop.

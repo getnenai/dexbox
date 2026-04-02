@@ -5,6 +5,8 @@ package web
 
 import (
 	"embed"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -15,7 +17,6 @@ import (
 	"github.com/wwt/guac"
 
 	"github.com/getnenai/dexbox/internal/desktop"
-	"github.com/getnenai/dexbox/internal/guacd"
 )
 
 //go:embed static/viewer.html
@@ -65,65 +66,65 @@ func StaticHandler() http.Handler {
 	return http.FileServer(http.FS(staticFiles))
 }
 
+// writeJSONError writes a JSON error response with the given status code.
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	body, err := json.Marshal(map[string]string{"error": msg})
+	if err != nil {
+		// Fallback: msg contains something json.Marshal cannot encode (should
+		// never happen for plain strings, but be safe).
+		log.Printf("writeJSONError: marshal failed: %v", err)
+		http.Error(w, msg, status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	w.Write(body)
+}
+
 func serveViewer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(viewerHTML)
 }
 
 func serveTunnel(w http.ResponseWriter, r *http.Request, name string, mgr *desktop.Manager, guacdAddr string) {
-	cfg, ok := mgr.RDPConfig(name)
-	if !ok {
-		http.Error(w, fmt.Sprintf("desktop %q is not an RDP connection; browser view requires RDP or VRDE-enabled VMs", name), http.StatusNotFound)
+	// Connect on demand: if no live session exists yet, establish one now.
+	// This happens on first use (first viewer open or first agent Up()).
+	ctx := r.Context()
+	if err := mgr.EnsureRDPConnected(ctx, name); err != nil {
+		log.Printf("[tunnel %s] connect failed: %v", name, err)
+		if errors.Is(err, desktop.ErrDesktopNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSONError(w, http.StatusServiceUnavailable, "rdp session not ready")
 		return
 	}
 
-	// If an agent RDP session is active, join it read-only. Guacd connection
-	// IDs already carry the $ prefix (e.g. $abc-123); passing it as-is in
-	// config.ConnectionID tells guacd to join the existing session instead of
-	// opening a new one that would kick the agent out.
-	connectionID := ""
-	if rdp, active := mgr.ActiveRDP(name); active {
-		if id := rdp.GuacdConnectionID(); id != "" {
-			connectionID = id
-			log.Printf("[tunnel %s] joining existing agent session %s read-only", name, id)
-		}
+	// The web viewer always joins the server's persistent bring.Client session.
+	// It never creates its own full RDP connection — that would compete with
+	// the server's session and disconnect the agent.
+	rdp, ok := mgr.ActiveRDP(name)
+	if !ok {
+		writeJSONError(w, http.StatusServiceUnavailable, "rdp session not ready, connection ID unavailable")
+		return
 	}
 
-	// Build Guacamole configuration.
+	connectionID := rdp.GuacdConnectionID()
+	if connectionID == "" {
+		writeJSONError(w, http.StatusServiceUnavailable, "rdp session not ready, connection ID unavailable")
+		return
+	}
+
+	agentActive := mgr.IsAgentActive(name)
+	log.Printf("[tunnel %s] joining session %s (agent_active=%v)", name, connectionID, agentActive)
+
+	// Build Guacamole join configuration.
 	config := guac.NewGuacamoleConfiguration()
-	if connectionID != "" {
-		// Joining an existing session: only the connection ID is needed.
-		config.ConnectionID = connectionID
-	} else {
-		config.Protocol = "rdp"
-		security := cfg.Security
-		if security == "" {
-			security = "any"
-		}
-		params := map[string]string{
-			"hostname":         cfg.Host,
-			"port":             fmt.Sprintf("%d", cfg.Port),
-			"username":         cfg.Username,
-			"password":         cfg.Password,
-			"security":         security,
-			"ignore-cert":      fmt.Sprintf("%t", cfg.IgnoreCert),
-			"disable-audio":    "true",
-			"enable-wallpaper": "false",
-		}
-		if cfg.DriveEnabled {
-			driveName := strings.TrimSpace(cfg.DriveName)
-			if driveName == "" {
-				driveName = "Shared"
-			}
-			params["enable-drive"] = "true"
-			params["drive-name"] = driveName
-			params["drive-path"] = guacd.ContainerMount
-			params["create-drive-path"] = "true"
-		}
-		config.Parameters = params
-		config.OptimalScreenWidth = cfg.Width
-		config.OptimalScreenHeight = cfg.Height
-		config.ImageMimetypes = []string{"image/png", "image/jpeg"}
+	config.ConnectionID = connectionID
+	if agentActive {
+		// Tell guacd to enforce read-only at the protocol level so the
+		// viewer's keyboard/mouse events are silently dropped.
+		config.Parameters = map[string]string{"read-only": "true"}
 	}
 
 	// Use the wwt/guac WebsocketServer for the WebSocket↔guacd proxy.
@@ -154,12 +155,14 @@ func serveTunnel(w http.ResponseWriter, r *http.Request, name string, mgr *deskt
 	})
 
 	wsServer.OnConnectWs = func(id string, ws *websocket.Conn, r *http.Request) {
+		mgr.ViewerConnected(name)
 		uuidIns := guac.NewInstruction(guac.InternalDataOpcode, id)
 		log.Printf("[tunnel %s] sending UUID: %s", name, uuidIns.String())
 		_ = ws.WriteMessage(websocket.TextMessage, uuidIns.Byte())
 	}
 
 	wsServer.OnDisconnectWs = func(id string, ws *websocket.Conn, r *http.Request, t guac.Tunnel) {
+		mgr.ViewerDisconnected(name)
 		log.Printf("[tunnel %s] disconnected", name)
 	}
 
@@ -185,7 +188,7 @@ func serveEvents(w http.ResponseWriter, r *http.Request, name string, mgr *deskt
 
 	// Send the current state immediately so the browser can start in the
 	// right mode without waiting for the next transition.
-	if _, active := mgr.ActiveRDP(name); active {
+	if mgr.IsAgentActive(name) {
 		fmt.Fprintf(w, "data: agent_connected\n\n")
 	} else {
 		fmt.Fprintf(w, "data: agent_disconnected\n\n")
