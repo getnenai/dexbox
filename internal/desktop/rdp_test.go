@@ -55,8 +55,6 @@ func (m *mockClient) SendKey(key KeyCode, pressed bool) error {
 
 // --- GuacdConnectionID -------------------------------------------------
 
-// TestRDP_GuacdConnectionID_BeforeConnect verifies that GuacdConnectionID
-// returns an empty string before the client has reached SessionActive.
 func TestRDP_GuacdConnectionID_BeforeConnect(t *testing.T) {
 	r := NewBringRDP("test", RDPConfig{}, "localhost:4822")
 	if id := r.GuacdConnectionID(); id != "" {
@@ -64,10 +62,6 @@ func TestRDP_GuacdConnectionID_BeforeConnect(t *testing.T) {
 	}
 }
 
-// TestRDP_GuacdConnectionID_AfterActive verifies that GuacdConnectionID
-// returns the connection ID stored once the session reaches SessionActive.
-// We set connID directly (same package) to isolate the getter from the
-// real guacd connection logic.
 func TestRDP_GuacdConnectionID_AfterActive(t *testing.T) {
 	r := NewBringRDP("test", RDPConfig{}, "localhost:4822")
 	r.connID = "$abc-def-123"
@@ -88,7 +82,6 @@ func TestScreenshot_ReturnsPNG(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// PNG files start with the 8-byte PNG signature.
 	if len(data) < 8 || string(data[:4]) != "\x89PNG" {
 		prefix := data
 		if len(prefix) > 4 {
@@ -99,9 +92,9 @@ func TestScreenshot_ReturnsPNG(t *testing.T) {
 }
 
 func TestScreenshot_ContextCancelled(t *testing.T) {
-	c := &mockClient{img: nil} // always returns nil frame
+	c := &mockClient{img: nil}
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // already cancelled
+	cancel()
 
 	_, err := screenshot(ctx, c)
 	if !errors.Is(err, context.Canceled) {
@@ -119,7 +112,6 @@ func TestMouseClick_SendsTwoEvents(t *testing.T) {
 	if len(c.mouseEvents) != 2 {
 		t.Fatalf("expected 2 SendMouse calls, got %d", len(c.mouseEvents))
 	}
-	// First event carries a button; second is a release (no buttons).
 	if len(c.mouseEvents[0].btns) == 0 {
 		t.Error("expected press event to carry a button")
 	}
@@ -143,12 +135,9 @@ func TestMouseScroll_PositiveDzUsesMouseUp(t *testing.T) {
 	if err := mouseScroll(c, 0, 0, 2); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// First call is the position move (no button). Then 2×(press+release) = 4.
-	// Total: 1 + 4 = 5.
 	if len(c.mouseEvents) != 5 {
 		t.Fatalf("expected 5 events for dz=2, got %d", len(c.mouseEvents))
 	}
-	// Each press event must use MouseUp (scroll-up button).
 	for _, ev := range c.mouseEvents[1:] {
 		if len(ev.btns) == 1 && ev.btns[0] != bring.MouseUp {
 			t.Errorf("expected MouseUp, got %v", ev.btns[0])
@@ -195,7 +184,6 @@ func TestKeyPress_SingleKeyPressRelease(t *testing.T) {
 
 func TestKeyPress_ComboReleasedInReverseOrder(t *testing.T) {
 	c := &mockClient{}
-	// ctrl+c: press ctrl, press c, release c, release ctrl
 	if err := keyPress(c, "ctrl+c"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -215,4 +203,170 @@ func TestKeyPress_ComboReleasedInReverseOrder(t *testing.T) {
 			t.Errorf("event[%d]: got {%v, %v}, want {%v, %v}", i, ev.key, ev.pressed, expected[i].key, expected[i].pressed)
 		}
 	}
+}
+
+// --- buildGuacParams ---------------------------------------------------
+
+func TestRDP_buildGuacParams(t *testing.T) {
+	base := RDPConfig{
+		Host:     "10.0.0.1",
+		Port:     3389,
+		Username: "user",
+		Password: "pass",
+		Width:    1920,
+		Height:   1080,
+	}
+
+	tests := []struct {
+		name        string
+		cfg         RDPConfig
+		wantPresent map[string]string
+		wantAbsent  []string
+	}{
+		{
+			name:       "defaults: security=any, no optional params",
+			cfg:        base,
+			wantAbsent: []string{"ignore-cert", "drive-name", "drive-path"},
+		},
+		{
+			name: "explicit security mode preserved",
+			cfg:  withSecurity(base, "nla"),
+			wantPresent: map[string]string{
+				"security": "nla",
+			},
+		},
+		{
+			name: "IgnoreCert adds ignore-cert param",
+			cfg:  withIgnoreCert(base, true),
+			wantPresent: map[string]string{
+				"ignore-cert": "true",
+			},
+		},
+		{
+			name: "IgnoreCert false omits ignore-cert param",
+			cfg:  withIgnoreCert(base, false),
+			wantAbsent: []string{"ignore-cert"},
+		},
+		{
+			name: "DriveEnabled wires drive-name and fixed drive-path",
+			cfg:  withDrive(base, "SharedDrive"),
+			wantPresent: map[string]string{
+				"drive-name": "SharedDrive",
+				"drive-path": "/guacd-shared",
+			},
+		},
+		{
+			name: "DriveEnabled with empty DriveName defaults to Shared",
+			cfg:  withDrive(base, ""),
+			wantPresent: map[string]string{
+				"drive-name": "Shared",
+				"drive-path": "/guacd-shared",
+			},
+		},
+		{
+			name: "DriveEnabled with whitespace-only DriveName defaults to Shared",
+			cfg:  withDrive(base, "   "),
+			wantPresent: map[string]string{
+				"drive-name": "Shared",
+				"drive-path": "/guacd-shared",
+			},
+		},
+		{
+			name: "DriveDisabled omits drive params even with non-empty DriveName",
+			cfg: func() RDPConfig {
+				c := base
+				c.DriveEnabled = false
+				c.DriveName = "disabled-drive"
+				return c
+			}(),
+			wantAbsent: []string{"drive-name", "drive-path"},
+		},
+		{
+			name: "DriveName trimmed of surrounding whitespace",
+			cfg:  withDrive(base, "  SharedDrive  "),
+			wantPresent: map[string]string{
+				"drive-name": "SharedDrive",
+				"drive-path": "/guacd-shared",
+			},
+		},
+		{
+			name: "DriveEnabled preserves other params",
+			cfg:  withDrive(withIgnoreCert(base, true), "D"),
+			wantPresent: map[string]string{
+				"ignore-cert": "true",
+				"drive-name":  "D",
+				"drive-path":  "/guacd-shared",
+			},
+		},
+	}
+
+	// baseline holds params that must be present in every output regardless
+	// of which optional features are enabled. tt.wantPresent entries override
+	// baseline values (e.g. a case that sets security="nla" overrides "any").
+	baseline := map[string]string{
+		"hostname":         "10.0.0.1",
+		"port":             "3389",
+		"username":         "user",
+		"password":         "pass",
+		"width":            "1920",
+		"height":           "1080",
+		"security":         "any",
+		"client-name":      "Dexbox",
+		"disable-audio":    "true",
+		"enable-wallpaper": "false",
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewBringRDP("test", tt.cfg, "localhost:4822")
+			params := r.buildGuacParams()
+
+			check := make(map[string]string, len(baseline)+len(tt.wantPresent))
+			for k, v := range baseline {
+				check[k] = v
+			}
+			for k, v := range tt.wantPresent {
+				check[k] = v
+			}
+
+			for k, want := range check {
+				got, ok := params[k]
+				if !ok {
+					t.Errorf("param %q missing", k)
+					continue
+				}
+				if got != want {
+					t.Errorf("param %q = %q, want %q", k, got, want)
+				}
+			}
+
+			for _, k := range tt.wantAbsent {
+				if v, ok := params[k]; ok {
+					t.Errorf("param %q should be absent, got %q", k, v)
+				}
+			}
+
+			for k, v := range params {
+				if _, expected := check[k]; !expected {
+					t.Errorf("unexpected param %q = %q", k, v)
+				}
+			}
+		})
+	}
+}
+
+func withSecurity(cfg RDPConfig, sec string) RDPConfig {
+	cfg.Security = sec
+	return cfg
+}
+
+func withIgnoreCert(cfg RDPConfig, v bool) RDPConfig {
+	cfg.IgnoreCert = v
+	return cfg
+}
+
+func withDrive(cfg RDPConfig, name string) RDPConfig {
+	cfg.DriveEnabled = true
+	cfg.DriveName = name
+	return cfg
 }

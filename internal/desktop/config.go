@@ -20,6 +20,13 @@ type RDPConfig struct {
 	// Security sets the RDP security mode passed to guacd: "any" (default),
 	// "rdp" (classic), "nla", or "tls". Use "rdp" for VirtualBox VRDE.
 	Security string `json:"security,omitempty"`
+	// DriveEnabled enables RDP drive redirection via guacd. When true, the
+	// host directory mounted at /guacd-shared inside the guacd container is
+	// exposed to Windows as a named drive. DriveName controls the label
+	// Windows shows in File Explorer (e.g. "Shared" appears as
+	// "Shared on Dexbox"). Defaults to "Shared" when blank.
+	DriveEnabled bool   `json:"drive_enabled,omitempty"`
+	DriveName    string `json:"drive_name,omitempty"`
 }
 
 // ConnectionStore persists RDP connection configs to ~/.dexbox/connections.json.

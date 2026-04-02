@@ -61,6 +61,38 @@ func NewBringRDP(name string, cfg RDPConfig, guacdAddr string) *BringRDP {
 	}
 }
 
+// buildGuacParams constructs the guacd parameter map from the RDP config.
+func (r *BringRDP) buildGuacParams() map[string]string {
+	security := r.config.Security
+	if security == "" {
+		security = "any"
+	}
+	params := map[string]string{
+		"hostname":         r.config.Host,
+		"port":             fmt.Sprintf("%d", r.config.Port),
+		"username":         r.config.Username,
+		"password":         r.config.Password,
+		"width":            fmt.Sprintf("%d", r.config.Width),
+		"height":           fmt.Sprintf("%d", r.config.Height),
+		"security":         security,
+		"client-name":      "Dexbox",
+		"disable-audio":    "true",
+		"enable-wallpaper": "false",
+	}
+	if r.config.IgnoreCert {
+		params["ignore-cert"] = "true"
+	}
+	if r.config.DriveEnabled {
+		driveName := strings.TrimSpace(r.config.DriveName)
+		if driveName == "" {
+			driveName = "Shared"
+		}
+		params["drive-name"] = driveName
+		params["drive-path"] = "/guacd-shared"
+	}
+	return params
+}
+
 func (r *BringRDP) Connect(ctx context.Context) (retErr error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -69,24 +101,7 @@ func (r *BringRDP) Connect(ctx context.Context) (retErr error) {
 		return nil
 	}
 
-	security := r.config.Security
-	if security == "" {
-		security = "any"
-	}
-	guacConfig := map[string]string{
-		"hostname":         r.config.Host,
-		"port":             fmt.Sprintf("%d", r.config.Port),
-		"username":         r.config.Username,
-		"password":         r.config.Password,
-		"width":            fmt.Sprintf("%d", r.config.Width),
-		"height":           fmt.Sprintf("%d", r.config.Height),
-		"security":         security,
-		"disable-audio":    "true",
-		"enable-wallpaper": "false",
-	}
-	if r.config.IgnoreCert {
-		guacConfig["ignore-cert"] = "true"
-	}
+	guacConfig := r.buildGuacParams()
 
 	client, err := bring.NewClient(r.guacdAddr, "rdp", guacConfig, &bring.DefaultLogger{Quiet: true})
 	if err != nil {

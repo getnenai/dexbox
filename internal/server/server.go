@@ -554,14 +554,16 @@ func (s *Server) handleCreateDesktop(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req struct {
-		Type     string `json:"type"` // "vm" or "rdp"
-		Name     string `json:"name,omitempty"`
-		Host     string `json:"host,omitempty"`
-		Port     int    `json:"port,omitempty"`
-		Username string `json:"username,omitempty"`
-		Password string `json:"password,omitempty"`
-		Width    int    `json:"width,omitempty"`
-		Height   int    `json:"height,omitempty"`
+		Type         string `json:"type"` // "vm" or "rdp"
+		Name         string `json:"name,omitempty"`
+		Host         string `json:"host,omitempty"`
+		Port         int    `json:"port,omitempty"`
+		Username     string `json:"username,omitempty"`
+		Password     string `json:"password,omitempty"`
+		Width        int    `json:"width,omitempty"`
+		Height       int    `json:"height,omitempty"`
+		DriveEnabled bool   `json:"drive_enabled,omitempty"`
+		DriveName    string `json:"drive_name,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
@@ -574,12 +576,14 @@ func (s *Server) handleCreateDesktop(w http.ResponseWriter, r *http.Request) {
 	switch req.Type {
 	case "rdp", "":
 		s.createRDP(w, ctx, req.Name, desktop.RDPConfig{
-			Host:     req.Host,
-			Port:     req.Port,
-			Username: req.Username,
-			Password: req.Password,
-			Width:    req.Width,
-			Height:   req.Height,
+			Host:         req.Host,
+			Port:         req.Port,
+			Username:     req.Username,
+			Password:     req.Password,
+			Width:        req.Width,
+			Height:       req.Height,
+			DriveEnabled: req.DriveEnabled,
+			DriveName:    req.DriveName,
 		})
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
