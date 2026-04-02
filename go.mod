@@ -10,7 +10,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/spf13/cobra v1.10.2
 	github.com/wwt/guac v1.3.3
-	golang.org/x/image v0.23.0
+	golang.org/x/image v0.24.0
 )
 
 require (
@@ -20,7 +20,6 @@ require (
 	github.com/charmbracelet/x/cellbuf v0.0.13-0.20250311204145-2c3ea96c31dd // indirect
 	github.com/charmbracelet/x/term v0.2.1 // indirect
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
-	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
@@ -40,4 +39,11 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 )
 
+// getnenai/guac mirrors wwt/guac with minor fixes needed for VRDE compatibility.
 replace github.com/wwt/guac => github.com/getnenai/guac v1.3.3
+
+// getnenai/bring forks deluan/bring to expose Client.ConnectionID(), which returns
+// the guacd connection ID after handshake. This is required so the browser tunnel
+// can join an active agent session read-only instead of opening a competing RDP
+// connection. See: https://github.com/getnenai/bring
+replace github.com/deluan/bring => github.com/getnenai/bring v0.0.8-nen-0.1

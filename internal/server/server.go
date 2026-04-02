@@ -106,14 +106,15 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /desktops/{name}", s.handleDesktopAction)
 	mux.HandleFunc("DELETE /desktops/{name}", s.handleDeleteDesktop)
 
-	// Browser UI (view/tunnel).
-	// Reuse the store from the desktop manager so API-created connections
-	// are immediately visible in the browser UI.
-	webHandler := web.Handler(s.desktops.Store(), s.manager, "localhost:4822")
+	// Browser UI (view/tunnel/events).
+	webHandler := web.Handler(s.desktops, "localhost:4822")
 	mux.HandleFunc("GET /desktops/{name}/view", func(w http.ResponseWriter, r *http.Request) {
 		webHandler.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("GET /desktops/{name}/tunnel", func(w http.ResponseWriter, r *http.Request) {
+		webHandler.ServeHTTP(w, r)
+	})
+	mux.HandleFunc("GET /desktops/{name}/events", func(w http.ResponseWriter, r *http.Request) {
 		webHandler.ServeHTTP(w, r)
 	})
 

@@ -157,6 +157,176 @@ func TestManagerUp_RDPMutexRelease(t *testing.T) {
 	}
 }
 
+// TestManagerNotify_SendsToAllSubscribers verifies that notify delivers a
+// SessionEvent to every subscriber registered for that desktop name.
+func TestManagerNotify_SendsToAllSubscribers(t *testing.T) {
+	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
+	mgr := NewManager(nil, store, "localhost:4822")
+
+	ch1, cancel1 := mgr.Subscribe("win")
+	ch2, cancel2 := mgr.Subscribe("win")
+	defer cancel1()
+	defer cancel2()
+
+	mgr.notify("win", SessionUp)
+
+	for i, ch := range []<-chan SessionEvent{ch1, ch2} {
+		select {
+		case evt := <-ch:
+			if evt.Type != SessionUp || evt.Name != "win" {
+				t.Errorf("subscriber %d: got %+v, want {SessionUp win}", i+1, evt)
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Errorf("subscriber %d: no event received", i+1)
+		}
+	}
+}
+
+// TestManagerSubscribe_CancelRemovesSubscriber verifies that calling the
+// cancel function closes the channel and stops future events from being
+// delivered.
+func TestManagerSubscribe_CancelRemovesSubscriber(t *testing.T) {
+	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
+	mgr := NewManager(nil, store, "localhost:4822")
+
+	ch, cancel := mgr.Subscribe("win")
+	cancel() // unsubscribe and close channel before any event
+
+	// The channel must be closed: a receive should return ok==false immediately.
+	select {
+	case evt, ok := <-ch:
+		if ok {
+			t.Errorf("expected channel closed after cancel, got real event %+v", evt)
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Error("channel was not closed after cancel")
+	}
+}
+
+// TestManagerDown_NotifiesSessionDown verifies that Down() fires a SessionDown
+// event to subscribers after disconnecting an RDP session.
+func TestManagerDown_NotifiesSessionDown(t *testing.T) {
+	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
+	mgr := NewManager(nil, store, "localhost:4822")
+
+	mock := &mockDesktop{name: "win", typ: "rdp", isConnected: true}
+	mgr.SetSession("win", mock)
+
+	ch, cancel := mgr.Subscribe("win")
+	defer cancel()
+
+	if err := mgr.Down(context.Background(), "win", false, false); err != nil {
+		t.Fatalf("Down failed: %v", err)
+	}
+
+	select {
+	case evt := <-ch:
+		if evt.Type != SessionDown || evt.Name != "win" {
+			t.Errorf("got %+v, want {SessionDown win}", evt)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("no SessionDown event received after Down()")
+	}
+}
+
+// TestManagerDown_NoNotifyForVM verifies that Down() does not fire a
+// SessionDown event for a VM session. SessionUp is only emitted for RDP, so
+// emitting SessionDown for VMs would produce unmatched events.
+func TestManagerDown_NoNotifyForVM(t *testing.T) {
+	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
+	mgr := NewManager(nil, store, "localhost:4822")
+
+	mgr.SetSession("my-vm", &mockDesktop{name: "my-vm", typ: "vm", isConnected: true})
+
+	ch, cancel := mgr.Subscribe("my-vm")
+	defer cancel()
+
+	if err := mgr.Down(context.Background(), "my-vm", false, false); err != nil {
+		t.Fatalf("Down failed: %v", err)
+	}
+
+	select {
+	case evt := <-ch:
+		t.Errorf("expected no event for VM session, got %+v", evt)
+	case <-time.After(50 * time.Millisecond):
+		// expected — VMs never emit session events
+	}
+}
+
+// TestManagerActiveRDP_ReturnsRDP verifies that ActiveRDP returns the *RDP
+// session when one is registered for that name.
+func TestManagerActiveRDP_ReturnsRDP(t *testing.T) {
+	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
+	mgr := NewManager(nil, store, "localhost:4822")
+
+	rdp := NewBringRDP("win", RDPConfig{Host: "localhost", Port: 3389}, "localhost:4822")
+	rdp.SetConnected(true) // simulate a live session without dialing guacd
+	mgr.SetSession("win", rdp)
+
+	got, ok := mgr.ActiveRDP("win")
+	if !ok {
+		t.Fatal("ActiveRDP returned false for an active RDP session")
+	}
+	if got != rdp {
+		t.Error("ActiveRDP returned wrong *RDP instance")
+	}
+}
+
+// TestManagerActiveRDP_ReturnsFalseForNonRDP verifies that ActiveRDP returns
+// false when the active session is a VM (not an *RDP).
+func TestManagerActiveRDP_ReturnsFalseForNonRDP(t *testing.T) {
+	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
+	mgr := NewManager(nil, store, "localhost:4822")
+
+	mgr.SetSession("my-vm", &mockDesktop{name: "my-vm", typ: "vm"})
+
+	_, ok := mgr.ActiveRDP("my-vm")
+	if ok {
+		t.Error("ActiveRDP should return false for a VM session")
+	}
+}
+
+// TestManagerActiveRDP_ReturnsFalseWhenMissing verifies that ActiveRDP
+// returns false when no session is registered for the given name.
+func TestManagerActiveRDP_ReturnsFalseWhenMissing(t *testing.T) {
+	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
+	mgr := NewManager(nil, store, "localhost:4822")
+
+	_, ok := mgr.ActiveRDP("nonexistent")
+	if ok {
+		t.Error("ActiveRDP should return false for a missing session")
+	}
+}
+
+// TestManagerRDPConfig_Found verifies that RDPConfig returns the stored
+// connection configuration for a known desktop name.
+func TestManagerRDPConfig_Found(t *testing.T) {
+	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
+	cfg := RDPConfig{Host: "192.168.1.1", Port: 3389, Username: "admin"}
+	store.Add("win", cfg)
+	mgr := NewManager(nil, store, "localhost:4822")
+
+	got, ok := mgr.RDPConfig("win")
+	if !ok {
+		t.Fatal("RDPConfig returned false for a stored config")
+	}
+	if got.Host != cfg.Host || got.Port != cfg.Port || got.Username != cfg.Username {
+		t.Errorf("got %+v, want %+v", got, cfg)
+	}
+}
+
+// TestManagerRDPConfig_NotFound verifies that RDPConfig returns false for
+// an unknown desktop name.
+func TestManagerRDPConfig_NotFound(t *testing.T) {
+	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
+	mgr := NewManager(nil, store, "localhost:4822")
+
+	_, ok := mgr.RDPConfig("nonexistent")
+	if ok {
+		t.Error("RDPConfig should return false for an unknown desktop")
+	}
+}
+
 // TestManagerUp_RDPDeadlock verifies that Manager.Up() for an RDP desktop
 // does not deadlock when the RDP connection succeeds.
 //

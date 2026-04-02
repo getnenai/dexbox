@@ -13,29 +13,55 @@ import (
 	"github.com/deluan/bring"
 )
 
-// RDP implements Desktop using deluan/bring to talk to a guacd daemon
+// Type aliases so the Client interface doesn't leak bring's concrete types.
+// Using aliases (not new types) means bring values satisfy them directly.
+type (
+	SessionState = bring.SessionState
+	MouseButton  = bring.MouseButton
+	KeyCode      = bring.KeyCode
+)
+
+// Client is the subset of *bring.Client that BringRDP depends on.
+// Defined here to document the contract and enable passing a test double
+// as a function argument where needed.
+type Client interface {
+	Start()
+	Stop()
+	State() SessionState
+	// ConnectionID returns the guacd connection ID assigned during handshake.
+	// Empty until the session reaches SessionActive.
+	ConnectionID() string
+	Screen() (image.Image, int64)
+	SendMouse(p image.Point, pressedButtons ...MouseButton) error
+	SendText(sequence string) error
+	SendKey(key KeyCode, pressed bool) error
+}
+
+// BringRDP implements Desktop using deluan/bring to talk to a guacd daemon
 // which proxies the actual RDP connection.
-type RDP struct {
+type BringRDP struct {
 	name      string
 	config    RDPConfig
 	guacdAddr string
 
 	client *bring.Client
+	connID string // guacd connection ID from handshake; set after SessionActive
+	live   bool   // true once Connect succeeds; false after Disconnect
 	state  bring.SessionState
 	mu     sync.Mutex
 	done   chan struct{} // closed when client.Start() returns
 }
 
-// NewRDP creates an RDP desktop. Call Connect to establish the session.
-func NewRDP(name string, cfg RDPConfig, guacdAddr string) *RDP {
-	return &RDP{
+// NewBringRDP creates an RDP desktop. Call Connect to establish the session.
+func NewBringRDP(name string, cfg RDPConfig, guacdAddr string) *BringRDP {
+	return &BringRDP{
 		name:      name,
 		config:    cfg,
 		guacdAddr: guacdAddr,
 	}
 }
 
-func (r *RDP) Connect(ctx context.Context) error {
+func (r *BringRDP) Connect(ctx context.Context) (retErr error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -76,6 +102,20 @@ func (r *RDP) Connect(ctx context.Context) error {
 		client.Start()
 	}()
 
+	// On any error return, stop the client and reset all state so that a
+	// subsequent Connect() call can start fresh rather than seeing a
+	// non-nil r.client from a broken session.
+	defer func() {
+		if retErr != nil {
+			client.Stop()
+			<-r.done // wait for Start() goroutine to exit
+			r.client = nil
+			r.connID = ""
+			r.live = false
+			r.done = nil
+		}
+	}()
+
 	// Wait for the session to become active
 	deadline := time.After(15 * time.Second)
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -91,6 +131,8 @@ func (r *RDP) Connect(ctx context.Context) error {
 			return fmt.Errorf("RDP session closed during connection")
 		case <-ticker.C:
 			if client.State() == bring.SessionActive {
+				r.connID = client.ConnectionID()
+				r.live = true
 				// Give the display a moment to receive the initial frame
 				time.Sleep(500 * time.Millisecond)
 				return nil
@@ -99,7 +141,7 @@ func (r *RDP) Connect(ctx context.Context) error {
 	}
 }
 
-func (r *RDP) Disconnect() error {
+func (r *BringRDP) Disconnect() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -107,26 +149,42 @@ func (r *RDP) Disconnect() error {
 		return nil
 	}
 
-	// The bring client doesn't expose a Close/Disconnect method.
-	// Setting client to nil and letting the GC clean up is the best we can do.
-	// The underlying TCP connection will be closed when the client is GC'd.
+	r.client.Stop()
+	if r.done != nil {
+		<-r.done // wait for Start() goroutine to exit
+		r.done = nil
+	}
 	r.client = nil
+	r.live = false
+	r.connID = ""
 	return nil
 }
 
-func (r *RDP) Connected() bool {
+func (r *BringRDP) Connected() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.client != nil && r.client.State() == bring.SessionActive
+	return r.live
 }
 
-func (r *RDP) Screenshot(ctx context.Context) ([]byte, error) {
+// SetConnected marks the session as live or not without dialing guacd.
+// Intended for use in tests that need to simulate an active session.
+func (r *BringRDP) SetConnected(b bool) {
+	r.mu.Lock()
+	r.live = b
+	r.mu.Unlock()
+}
+
+func (r *BringRDP) Screenshot(ctx context.Context) ([]byte, error) {
 	c := r.getClient()
 	if c == nil {
 		return nil, fmt.Errorf("RDP session not connected")
 	}
+	return screenshot(ctx, c)
+}
 
-	// Wait for the first non-empty frame (guacd may not have delivered one yet).
+// screenshot captures a PNG screenshot from a connected Guacamole client.
+// It waits up to 10 s for the first non-empty frame before returning an error.
+func screenshot(ctx context.Context, c Client) ([]byte, error) {
 	var img image.Image
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -143,7 +201,6 @@ func (r *RDP) Screenshot(ctx context.Context) ([]byte, error) {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		return nil, fmt.Errorf("encode screenshot: %w", err)
@@ -157,24 +214,25 @@ func (r *RDP) Screenshot(ctx context.Context) ([]byte, error) {
 //	bring: MouseLeft=1, MouseMiddle=2, MouseRight=4
 //
 // The Desktop interface uses VBox convention, so we translate here.
-func (r *RDP) MouseClick(x, y, buttonMask int) error {
+func (r *BringRDP) MouseClick(x, y, buttonMask int) error {
 	c := r.getClient()
 	if c == nil {
 		return fmt.Errorf("RDP session not connected")
 	}
+	return mouseClick(c, x, y, buttonMask)
+}
+
+func mouseClick(c Client, x, y, buttonMask int) error {
 	p := image.Pt(x, y)
 	btn := translateButton(buttonMask)
-
-	// Press
 	if err := c.SendMouse(p, btn); err != nil {
 		return err
 	}
 	time.Sleep(50 * time.Millisecond)
-	// Release
 	return c.SendMouse(p)
 }
 
-func (r *RDP) MouseMoveAbsolute(x, y int) error {
+func (r *BringRDP) MouseMoveAbsolute(x, y int) error {
 	c := r.getClient()
 	if c == nil {
 		return fmt.Errorf("RDP session not connected")
@@ -182,40 +240,43 @@ func (r *RDP) MouseMoveAbsolute(x, y int) error {
 	return c.SendMouse(image.Pt(x, y))
 }
 
-func (r *RDP) MouseDoubleClick(x, y, buttonMask int) error {
-	if err := r.MouseClick(x, y, buttonMask); err != nil {
-		return err
-	}
-	time.Sleep(50 * time.Millisecond)
-	return r.MouseClick(x, y, buttonMask)
-}
-
-func (r *RDP) MouseScroll(x, y, dz int) error {
+func (r *BringRDP) MouseDoubleClick(x, y, buttonMask int) error {
 	c := r.getClient()
 	if c == nil {
 		return fmt.Errorf("RDP session not connected")
 	}
-	p := image.Pt(x, y)
+	if err := mouseClick(c, x, y, buttonMask); err != nil {
+		return err
+	}
+	time.Sleep(50 * time.Millisecond)
+	return mouseClick(c, x, y, buttonMask)
+}
 
-	// Move to position first
+func (r *BringRDP) MouseScroll(x, y, dz int) error {
+	c := r.getClient()
+	if c == nil {
+		return fmt.Errorf("RDP session not connected")
+	}
+	return mouseScroll(c, x, y, dz)
+}
+
+// mouseScroll sends scroll events. Positive dz scrolls up, negative scrolls down.
+func mouseScroll(c Client, x, y, dz int) error {
+	p := image.Pt(x, y)
 	if err := c.SendMouse(p); err != nil {
 		return err
 	}
-
-	// Send scroll events — bring uses MouseUp/MouseDown buttons for scroll
-	var btn bring.MouseButton
+	var btn MouseButton
 	if dz > 0 {
 		btn = bring.MouseUp
 	} else {
 		btn = bring.MouseDown
 		dz = -dz
 	}
-
 	for i := 0; i < dz; i++ {
 		if err := c.SendMouse(p, btn); err != nil {
 			return err
 		}
-		// Release scroll button
 		if err := c.SendMouse(p); err != nil {
 			return err
 		}
@@ -223,16 +284,15 @@ func (r *RDP) MouseScroll(x, y, dz int) error {
 	return nil
 }
 
-func (r *RDP) MouseDown(x, y, buttonMask int) error {
+func (r *BringRDP) MouseDown(x, y, buttonMask int) error {
 	c := r.getClient()
 	if c == nil {
 		return fmt.Errorf("RDP session not connected")
 	}
-	btn := translateButton(buttonMask)
-	return c.SendMouse(image.Pt(x, y), btn)
+	return c.SendMouse(image.Pt(x, y), translateButton(buttonMask))
 }
 
-func (r *RDP) MouseUp(x, y int) error {
+func (r *BringRDP) MouseUp(x, y int) error {
 	c := r.getClient()
 	if c == nil {
 		return fmt.Errorf("RDP session not connected")
@@ -240,7 +300,7 @@ func (r *RDP) MouseUp(x, y int) error {
 	return c.SendMouse(image.Pt(x, y)) // no buttons = release
 }
 
-func (r *RDP) TypeText(ctx context.Context, text string) error {
+func (r *BringRDP) TypeText(ctx context.Context, text string) error {
 	c := r.getClient()
 	if c == nil {
 		return fmt.Errorf("RDP session not connected")
@@ -248,14 +308,19 @@ func (r *RDP) TypeText(ctx context.Context, text string) error {
 	return c.SendText(text)
 }
 
-func (r *RDP) KeyPress(ctx context.Context, spec string) error {
+func (r *BringRDP) KeyPress(ctx context.Context, spec string) error {
 	c := r.getClient()
 	if c == nil {
 		return fmt.Errorf("RDP session not connected")
 	}
+	return keyPress(c, spec)
+}
 
+// keyPress parses a key spec (e.g. "ctrl+c", "shift+F4") and sends the
+// press/release sequence to the client.
+func keyPress(c Client, spec string) error {
 	parts := strings.Split(spec, "+")
-	keys := make([]bring.KeyCode, 0, len(parts))
+	keys := make([]KeyCode, 0, len(parts))
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		key, ok := resolveKeyCode(part)
@@ -264,14 +329,11 @@ func (r *RDP) KeyPress(ctx context.Context, spec string) error {
 		}
 		keys = append(keys, key)
 	}
-
-	// Press all keys
 	for _, key := range keys {
 		if err := c.SendKey(key, true); err != nil {
 			return err
 		}
 	}
-	// Release in reverse order
 	for i := len(keys) - 1; i >= 0; i-- {
 		if err := c.SendKey(keys[i], false); err != nil {
 			return err
@@ -280,10 +342,18 @@ func (r *RDP) KeyPress(ctx context.Context, spec string) error {
 	return nil
 }
 
-func (r *RDP) Name() string { return r.name }
-func (r *RDP) Type() string { return "rdp" }
+func (r *BringRDP) Name() string { return r.name }
+func (r *BringRDP) Type() string { return "rdp" }
 
-func (r *RDP) getClient() *bring.Client {
+// GuacdConnectionID returns the guacd connection ID assigned during handshake.
+// Returns an empty string if the session is not yet active.
+func (r *BringRDP) GuacdConnectionID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.connID
+}
+
+func (r *BringRDP) getClient() *bring.Client {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.client

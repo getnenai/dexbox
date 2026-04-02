@@ -11,6 +11,21 @@ import (
 	"github.com/getnenai/dexbox/internal/vbox"
 )
 
+// SessionEventType indicates whether an agent connected or disconnected.
+type SessionEventType int
+
+const (
+	SessionUp   SessionEventType = iota
+	SessionDown
+)
+
+// SessionEvent is sent on subscriber channels when an RDP agent for a named
+// desktop transitions between connected and disconnected.
+type SessionEvent struct {
+	Type SessionEventType
+	Name string
+}
+
 // DesktopStatus describes the state of any desktop (VM or RDP).
 type DesktopStatus struct {
 	Name      string `json:"name"`
@@ -27,6 +42,9 @@ type Manager struct {
 
 	sessions map[string]Desktop
 	mu       sync.Mutex
+
+	subs   map[string][]chan SessionEvent
+	subsMu sync.Mutex
 }
 
 // NewManager creates a unified desktop manager.
@@ -36,6 +54,7 @@ func NewManager(vboxMgr *vbox.Manager, store *ConnectionStore, guacdAddr string)
 		store:     store,
 		guacdAddr: guacdAddr,
 		sessions:  make(map[string]Desktop),
+		subs:      make(map[string][]chan SessionEvent),
 	}
 }
 
@@ -86,7 +105,7 @@ func (m *Manager) Up(ctx context.Context, name string) error {
 		return fmt.Errorf("guacd required for RDP: %w", err)
 	}
 
-	d := NewRDP(name, cfg, m.guacdAddr)
+	d := NewBringRDP(name, cfg, m.guacdAddr)
 	if err := d.Connect(ctx); err != nil {
 		return err
 	}
@@ -94,6 +113,7 @@ func (m *Manager) Up(ctx context.Context, name string) error {
 	// m.mu is already held (acquired at entry, released via defer).
 	// The VM path above stores its session the same way.
 	m.sessions[name] = d
+	m.notify(name, SessionUp)
 	return nil
 }
 
@@ -129,6 +149,9 @@ func (m *Manager) Down(ctx context.Context, name string, shutdown bool, force bo
 
 	if ok {
 		_ = d.Disconnect()
+		if d.Type() == "rdp" {
+			m.notify(name, SessionDown)
+		}
 	}
 
 	if !shutdown {
@@ -160,8 +183,11 @@ func (m *Manager) DownAll(ctx context.Context, force bool) error {
 	m.mu.Unlock()
 
 	// Disconnect all sessions
-	for _, d := range sessions {
+	for name, d := range sessions {
 		_ = d.Disconnect()
+		if d.Type() == "rdp" {
+			m.notify(name, SessionDown)
+		}
 	}
 
 	// Shutdown all running VMs
@@ -199,6 +225,72 @@ func (m *Manager) Get(name string) (Desktop, bool) {
 	defer m.mu.Unlock()
 	d, ok := m.sessions[name]
 	return d, ok
+}
+
+// Subscribe returns a channel that receives a SessionEvent whenever the named
+// desktop's agent session transitions up or down. The returned cancel function
+// must be called to release resources when the caller is done listening.
+func (m *Manager) Subscribe(name string) (<-chan SessionEvent, func()) {
+	ch := make(chan SessionEvent, 1)
+	m.subsMu.Lock()
+	m.subs[name] = append(m.subs[name], ch)
+	m.subsMu.Unlock()
+	cancel := func() {
+		m.subsMu.Lock()
+		defer m.subsMu.Unlock()
+		chans := m.subs[name]
+		for i, c := range chans {
+			if c == ch {
+				m.subs[name] = append(chans[:i], chans[i+1:]...)
+				close(ch) // signal consumers that no more events will arrive
+				return
+			}
+		}
+	}
+	return ch, cancel
+}
+
+// ActiveRDP returns the active *BringRDP session for the named desktop, if any.
+// Only returns a session whose Connected() method reports true; a session that
+// lost its guacd connection without an explicit Down() call is excluded.
+func (m *Manager) ActiveRDP(name string) (*BringRDP, bool) {
+	m.mu.Lock()
+	d, ok := m.sessions[name]
+	m.mu.Unlock()
+	if !ok {
+		return nil, false
+	}
+	r, ok := d.(*BringRDP)
+	if !ok || !r.Connected() {
+		return nil, false
+	}
+	return r, true
+}
+
+// RDPConfig returns the stored connection configuration for the named RDP desktop.
+func (m *Manager) RDPConfig(name string) (RDPConfig, bool) {
+	return m.store.Get(name)
+}
+
+// notify sends a SessionEvent to all subscribers for the named desktop.
+// If a subscriber's channel is full, the stale event is replaced with the
+// newest one (coalesce) so no transition is silently lost.
+func (m *Manager) notify(name string, t SessionEventType) {
+	m.subsMu.Lock()
+	defer m.subsMu.Unlock()
+	evt := SessionEvent{Type: t, Name: name}
+	for _, ch := range m.subs[name] {
+		select {
+		case ch <- evt:
+		default:
+			// Channel full: drain stale event then deliver newest.
+			select {
+			case <-ch:
+			default:
+			}
+			ch <- evt
+		}
+	}
 }
 
 // Resolve returns an active, connected desktop for tool execution.
