@@ -151,7 +151,9 @@ chmod +x "${INSTALL_DIR}/${BINARY}"
 
 # Codesign on macOS
 if [ "$OS" = "darwin" ]; then
-  codesign -f -s - "${INSTALL_DIR}/${BINARY}" 2>/dev/null || true
+  if ! codesign -f -s - "${INSTALL_DIR}/${BINARY}" >/dev/null 2>&1; then
+    echo "Warning: codesign failed; the binary may be blocked by macOS" >&2
+  fi
 fi
 
 echo ""
