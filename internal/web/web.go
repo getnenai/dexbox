@@ -15,6 +15,7 @@ import (
 	"github.com/wwt/guac"
 
 	"github.com/getnenai/dexbox/internal/desktop"
+	"github.com/getnenai/dexbox/internal/guacd"
 )
 
 //go:embed static/viewer.html
@@ -112,7 +113,7 @@ func serveTunnel(w http.ResponseWriter, r *http.Request, name string, mgr *deskt
 		if cfg.DriveEnabled && cfg.DriveName != "" {
 			params["enable-drive"] = "true"
 			params["drive-name"] = cfg.DriveName
-			params["drive-path"] = "/guacd-shared"
+			params["drive-path"] = guacd.ContainerMount
 			params["create-drive-path"] = "true"
 		}
 		config.Parameters = params

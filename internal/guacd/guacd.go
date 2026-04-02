@@ -17,7 +17,7 @@ const (
 	Image          = "guacamole/guacd:latest"
 	DefaultPort    = 4822
 	DefaultAddr    = "localhost:4822"
-	containerMount = "/guacd-shared"
+	ContainerMount = "/guacd-shared"
 )
 
 // Start launches the guacd Docker container. Idempotent: if the container
@@ -85,11 +85,12 @@ func IsListening() bool {
 	return true
 }
 
-// EnsureRunning starts guacd if it's not already running.
-// If Docker is unavailable but guacd is already listening on DefaultAddr,
-// this is treated as a success — useful when guacd was started externally.
+// EnsureRunning starts guacd if it's not already running, and reconciles the
+// bind-mount when sharedDir is non-empty. If Docker is unavailable but guacd
+// is already listening on DefaultAddr with no sharedDir required, this is
+// treated as a success — useful when guacd was started externally.
 func EnsureRunning(ctx context.Context, sharedDir string) error {
-	if IsListening() {
+	if IsListening() && sharedDir == "" {
 		return nil
 	}
 	return Start(ctx, sharedDir)
@@ -133,7 +134,7 @@ func createAndStart(ctx context.Context, sharedDir string) error {
 		"--restart", "unless-stopped",
 	}
 	if sharedDir != "" {
-		args = append(args, "--volume", sharedDir+":"+containerMount)
+		args = append(args, "--volume", sharedDir+":"+ContainerMount)
 	}
 	args = append(args, Image)
 

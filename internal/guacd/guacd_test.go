@@ -48,22 +48,41 @@ func TestIsListening_ReturnsTrue_WhenListening(t *testing.T) {
 	}
 }
 
-// TestEnsureRunning_SkipsStart_WhenAlreadyListening verifies that EnsureRunning
-// returns nil immediately when guacd is already accepting connections, without
-// attempting any Docker operations. This covers both sharedDir="" and
-// sharedDir non-empty: an externally-managed guacd process is trusted as-is.
-func TestEnsureRunning_SkipsStart_WhenAlreadyListening(t *testing.T) {
+// TestEnsureRunning_SkipsStart_WhenListening_NoSharedDir verifies that
+// EnsureRunning returns nil immediately when guacd is already listening and no
+// sharedDir is required, without touching Docker.
+func TestEnsureRunning_SkipsStart_WhenListening_NoSharedDir(t *testing.T) {
 	l, ok := startLocalListener(t)
 	if !ok {
 		t.Skip("cannot bind DefaultAddr; skipping")
 	}
 	defer l.Close()
 
-	ctx := context.Background()
+	if err := EnsureRunning(context.Background(), ""); err != nil {
+		t.Errorf("EnsureRunning(ctx, \"\") = %v; want nil when already listening with no sharedDir", err)
+	}
+}
 
-	for _, sharedDir := range []string{"", "/tmp/shared"} {
-		if err := EnsureRunning(ctx, sharedDir); err != nil {
-			t.Errorf("EnsureRunning(ctx, %q) = %v; want nil when already listening", sharedDir, err)
-		}
+// TestEnsureRunning_CallsStart_WhenListening_WithSharedDir verifies that
+// EnsureRunning still invokes Start for bind-mount reconciliation when a
+// non-empty sharedDir is passed, even if guacd is already listening.
+// In environments without Docker the call returns an error — that is the
+// expected path; the test just confirms we do NOT short-circuit to nil.
+func TestEnsureRunning_CallsStart_WhenListening_WithSharedDir(t *testing.T) {
+	l, ok := startLocalListener(t)
+	if !ok {
+		t.Skip("cannot bind DefaultAddr; skipping")
+	}
+	defer l.Close()
+
+	if DockerAvailable(context.Background()) {
+		t.Skip("Docker available; Start would actually run — skipping to avoid side effects")
+	}
+
+	// Without Docker, Start returns an error, proving EnsureRunning did not
+	// short-circuit to nil when sharedDir is non-empty.
+	err := EnsureRunning(context.Background(), "/tmp/shared")
+	if err == nil {
+		t.Error("EnsureRunning(ctx, \"/tmp/shared\") = nil; want an error when Docker is unavailable, confirming Start was called")
 	}
 }
