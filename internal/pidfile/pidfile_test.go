@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/getnenai/dexbox/internal/pidfile"
 )
@@ -56,14 +57,20 @@ func TestWrite_SetsPermissions(t *testing.T) {
 }
 
 func TestWrite_FailsWhenLiveProcessHoldsFile(t *testing.T) {
-	// The name must match the test binary so that ProcessName returns true,
-	// simulating a live daemon that already holds the PID file.
-	f := pidfile.New(tempPIDPath(t), "test")
+	// Use the actual test-binary basename so ProcessName's exact match
+	// recognises this process as the live holder of the PID file.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skip("cannot determine test executable name:", err)
+	}
+	name := filepath.Base(exe)
+
+	f := pidfile.New(tempPIDPath(t), name)
 	if _, err := f.Write(); err != nil {
 		t.Fatalf("first Write failed: %v", err)
 	}
 	// Second call should detect a live process and refuse to overwrite.
-	_, err := f.Write()
+	_, err = f.Write()
 	if err == nil {
 		t.Fatal("expected Write to fail when a live process holds the PID file, got nil")
 	}
@@ -85,7 +92,9 @@ func TestWrite_RecoversStalePIDFile(t *testing.T) {
 	}
 
 	path := tempPIDPath(t)
-	_ = os.WriteFile(path, []byte(strconv.Itoa(stalePID)+"\n"), 0o600)
+	if err := os.WriteFile(path, []byte(strconv.Itoa(stalePID)+"\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
 
 	f := pidfile.New(path, "test")
 	if _, err := f.Write(); err != nil {
@@ -128,7 +137,9 @@ func TestStop_ReturnsFalse_WhenFileAbsent(t *testing.T) {
 
 func TestStop_ReturnsFalse_WhenFileHasInvalidContent(t *testing.T) {
 	path := tempPIDPath(t)
-	_ = os.WriteFile(path, []byte("not-a-pid\n"), 0o600)
+	if err := os.WriteFile(path, []byte("not-a-pid\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
 
 	f := pidfile.New(path, "test")
 	if f.Stop(0) {
@@ -139,7 +150,9 @@ func TestStop_ReturnsFalse_WhenFileHasInvalidContent(t *testing.T) {
 func TestStop_ReturnsFalse_AndRemovesFile_WhenProcessNameMismatches(t *testing.T) {
 	path := tempPIDPath(t)
 	// Write our own PID so the process definitely exists and is reachable.
-	_ = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
 
 	// Use a name that will never match the test binary.
 	f := pidfile.New(path, "zzz-no-such-process-name-zzz")
@@ -149,6 +162,39 @@ func TestStop_ReturnsFalse_AndRemovesFile_WhenProcessNameMismatches(t *testing.T
 	// The PID file should have been removed after the identity check failed.
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("expected PID file to be removed after process-name mismatch")
+	}
+}
+
+func TestStop_ReturnsTrue_AndRemovesFile_WhenProcessTerminated(t *testing.T) {
+	// Spawn a long-lived subprocess so we have a real live PID to target.
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start subprocess: %v", err)
+	}
+	// Best-effort kill in case Stop fails; cmd.Wait is called explicitly below
+	// to reap the child (Wait may only be called once).
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+
+	path := tempPIDPath(t)
+	if err := os.WriteFile(path, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	// "sleep" is the exact basename of the subprocess we spawned.
+	f := pidfile.New(path, "sleep")
+	if !f.Stop(5 * time.Second) {
+		t.Fatal("Stop returned false, expected true for a live matching process")
+	}
+
+	// PID file must have been removed.
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Error("expected PID file to be removed after Stop")
+	}
+
+	// Reap the child process. Stop already sent at least SIGTERM so Wait
+	// should return promptly with a signal-terminated exit error.
+	if err := cmd.Wait(); err == nil {
+		t.Error("expected subprocess to exit with a signal error, got nil")
 	}
 }
 

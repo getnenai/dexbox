@@ -43,7 +43,7 @@ func (f *File) Write() (string, error) {
 		return "", fmt.Errorf("create PID dir: %w", err)
 	}
 	content := []byte(strconv.Itoa(os.Getpid()) + "\n")
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 3; i++ {
 		fh, err := os.OpenFile(f.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
 			_, werr := fh.Write(content)
@@ -70,6 +70,11 @@ func (f *File) Write() (string, error) {
 		}
 		// Dead process or unrecognised name — remove the stale file and retry.
 		if removeErr := os.Remove(f.path); removeErr != nil {
+			if errors.Is(removeErr, os.ErrNotExist) {
+				// A concurrent writer already removed the stale file.
+				// Retry O_EXCL; either we win the race or we find their file.
+				continue
+			}
 			return "", fmt.Errorf("PID file %s: could not remove stale copy: %w", f.path, removeErr)
 		}
 	}
@@ -131,8 +136,8 @@ func (f *File) Remove() error {
 	return nil
 }
 
-// ProcessName returns true if the process with the given PID appears to be
-// running under a command name that contains f.name (case-insensitive).
+// ProcessName returns true if the process with the given PID has an
+// executable basename that exactly matches f.name (case-insensitive).
 // On Linux it reads /proc/<pid>/cmdline; on other platforms it falls back to
 // "ps -p <pid> -o comm=" to get the command name.
 func (f *File) ProcessName(pid int) bool {
@@ -140,13 +145,14 @@ func (f *File) ProcessName(pid int) bool {
 	cmdlineFile := fmt.Sprintf("/proc/%d/cmdline", pid)
 	if data, err := os.ReadFile(cmdlineFile); err == nil {
 		// /proc/<pid>/cmdline is NUL-separated; only the first token is the exe.
-		name := strings.ToLower(strings.SplitN(string(data), "\x00", 2)[0])
-		return strings.Contains(filepath.Base(name), strings.ToLower(f.name))
+		name := strings.SplitN(string(data), "\x00", 2)[0]
+		return strings.EqualFold(filepath.Base(name), f.name)
 	}
 	// Fallback: ask ps for the command name (macOS / BSD).
+	// ps -o comm= may return a full path on some platforms; take the basename.
 	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
 	if err != nil {
 		return false
 	}
-	return strings.Contains(strings.ToLower(strings.TrimSpace(string(out))), strings.ToLower(f.name))
+	return strings.EqualFold(filepath.Base(strings.TrimSpace(string(out))), f.name)
 }

@@ -58,7 +58,9 @@ func recreateIfMountMissing(ctx context.Context, sharedDir string) (recreated bo
 		return false, nil
 	}
 	log.Printf("guacd: container %s is missing bind mount for %s; removing and recreating", ContainerName, sharedDir)
-	_ = run(ctx, "docker", "rm", "--force", ContainerName)
+	if err := run(ctx, "docker", "rm", "--force", ContainerName); err != nil {
+		log.Printf("guacd: failed to remove container %s before recreate: %v", ContainerName, err)
+	}
 	return true, createAndStart(ctx, sharedDir)
 }
 
