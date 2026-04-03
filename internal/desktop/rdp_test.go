@@ -583,10 +583,11 @@ func TestTypeText_DelayApplied(t *testing.T) {
 	elapsed := time.Since(start)
 	// With st == nil and delay = 10 ms, typeText sleeps twice per character:
 	// once as keyHold after keydown and once as delay after keyup.
-	// Two characters → at least 40 ms of intentional sleep; we assert only
-	// ≥ 20 ms for a 2× safety margin, making this robust even on slow CI.
-	if elapsed < 2*delay {
-		t.Errorf("expected at least %v elapsed with delay, got %v", 2*delay, elapsed)
+	// Two characters → at least 40 ms of intentional sleep; we assert
+	// ≥ 40 ms. Slow CI only makes elapsed longer, never shorter, so this
+	// threshold is reliable without any artificial safety haircut.
+	if elapsed < 4*delay {
+		t.Errorf("expected at least %v elapsed with delay, got %v", 4*delay, elapsed)
 	}
 }
 

@@ -71,8 +71,8 @@ func resolveKeyDelay(cfg RDPConfig) (time.Duration, error) {
 type syncTracker struct {
 	gen          atomic.Uint64
 	notify       chan struct{} // buffered 1; pinged on every sync
-	lastSyncNano atomic.Int64 // unix nanos of last signal() call
-	frameNanos   atomic.Int64 // EMA of inter-sync interval in nanos; 0 = unknown
+	lastSyncNano atomic.Int64  // unix nanos of last signal() call
+	frameNanos   atomic.Int64  // EMA of inter-sync interval in nanos; 0 = unknown
 }
 
 func newSyncTracker() *syncTracker {
@@ -143,7 +143,7 @@ type BringRDP struct {
 	agentActive bool   // true when an agent has claimed control via Up()
 	syncTracker *syncTracker
 	mu          sync.Mutex
-	connectMu   sync.Mutex // serializes concurrent Connect calls; allows retry on failure
+	connectMu   sync.Mutex    // serializes concurrent Connect calls; allows retry on failure
 	done        chan struct{} // closed when client.Start() returns
 	kaStop      chan struct{} // closed to stop the keepAlive goroutine
 }
@@ -361,14 +361,14 @@ func (r *BringRDP) keepAlive(stop <-chan struct{}) {
 				return
 			}
 
-		log.Printf("[rdp %s] session dropped, reconnecting in 5s", r.name)
-		r.mu.Lock()
-		r.live = false
-		r.connID = ""
-		r.done = nil
-		r.client = nil      // release the stopped client so it can be GC'd
-		r.syncTracker = nil // no longer valid after a session drop
-		r.mu.Unlock()
+			log.Printf("[rdp %s] session dropped, reconnecting in 5s", r.name)
+			r.mu.Lock()
+			r.live = false
+			r.connID = ""
+			r.done = nil
+			r.client = nil      // release the stopped client so it can be GC'd
+			r.syncTracker = nil // no longer valid after a session drop
+			r.mu.Unlock()
 		}
 
 		// Brief pause before reconnecting (or before retrying a failed reconnect).
@@ -459,6 +459,7 @@ func (r *BringRDP) Disconnect() error {
 		r.done = nil
 	}
 	r.client = nil
+	r.syncTracker = nil // no longer valid after disconnect
 	r.live = false
 	r.connID = ""
 	return nil
@@ -787,8 +788,6 @@ func releaseModifiers(c Client) {
 	}
 }
 
-
-
 func (r *BringRDP) KeyPress(ctx context.Context, spec string) error {
 	c := r.getClient()
 	if c == nil {
@@ -961,8 +960,8 @@ var keyMap = map[string]bring.KeyCode{
 // are sent as explicit key press/release events rather than raw Unicode, which
 // Windows RDP ignores or mishandles.
 var ctrlKeyCodes = map[rune]bring.KeyCode{
-	'\n': bring.KeyEnter,
-	'\t': bring.KeyTab,
-	'\b': bring.KeyBackspace,
+	'\n':   bring.KeyEnter,
+	'\t':   bring.KeyTab,
+	'\b':   bring.KeyBackspace,
 	'\x1b': bring.KeyEscape,
 }
