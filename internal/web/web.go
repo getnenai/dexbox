@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 	"github.com/wwt/guac"
@@ -90,6 +91,23 @@ func serveTunnel(w http.ResponseWriter, r *http.Request, name string, mgr *deskt
 	// Connect on demand: if no live session exists yet, establish one now.
 	// This happens on first use (first viewer open or first agent Up()).
 	ctx := r.Context()
+
+	if _, ok := mgr.RDPConfig(name); !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Reserve the viewer slot before EnsureRDPConnected so idle teardown cannot
+	// remove the session between dial and WebSocket upgrade. Roll back on any
+	// path that exits before the client WebSocket is established.
+	var wsUp atomic.Bool
+	defer func() {
+		if !wsUp.Load() {
+			mgr.ViewerDisconnected(name)
+		}
+	}()
+	mgr.ViewerConnected(name)
+
 	if err := mgr.EnsureRDPConnected(ctx, name); err != nil {
 		log.Printf("[tunnel %s] connect failed: %v", name, err)
 		if errors.Is(err, desktop.ErrDesktopNotFound) {
@@ -155,7 +173,7 @@ func serveTunnel(w http.ResponseWriter, r *http.Request, name string, mgr *deskt
 	})
 
 	wsServer.OnConnectWs = func(id string, ws *websocket.Conn, r *http.Request) {
-		mgr.ViewerConnected(name)
+		wsUp.Store(true)
 		uuidIns := guac.NewInstruction(guac.InternalDataOpcode, id)
 		log.Printf("[tunnel %s] sending UUID: %s", name, uuidIns.String())
 		_ = ws.WriteMessage(websocket.TextMessage, uuidIns.Byte())

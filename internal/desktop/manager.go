@@ -25,7 +25,7 @@ var ErrDesktopNotFound = errors.New("desktop not found")
 type SessionEventType int
 
 const (
-	SessionUp   SessionEventType = iota
+	SessionUp SessionEventType = iota
 	SessionDown
 )
 
@@ -61,6 +61,11 @@ type Manager struct {
 	viewerCount map[string]int
 	idleTimers  map[string]idleTimer
 	viewerMu    sync.Mutex
+
+	// Per-desktop mutex serializes EnsureRDPConnected so concurrent tunnel
+	// requests cannot each store a new *BringRDP and overwrite m.sessions[name]
+	// before Connect completes.
+	rdpConnectMu sync.Map // string -> *sync.Mutex
 }
 
 // NewManager creates a unified desktop manager.
@@ -173,6 +178,23 @@ func rdpReachable(host string, port int) bool {
 // For VMs: disconnects and removes the session. If shutdown is true, also
 // powers off the VM.
 func (m *Manager) Down(ctx context.Context, name string, shutdown bool, force bool) error {
+	// VM-only shutdown validation first: avoid mutating RDP session state on the
+	// error path when the caller asked to power off a non-VM / missing desktop.
+	if shutdown {
+		if !vbox.VMExists(ctx, name) {
+			m.mu.Lock()
+			var hadRDP bool
+			if d, ok := m.sessions[name]; ok {
+				hadRDP = d.Type() == "rdp"
+			}
+			m.mu.Unlock()
+			if hadRDP {
+				return fmt.Errorf("cannot shutdown an RDP target; use 'down' to disconnect")
+			}
+			return fmt.Errorf("desktop %q not found", name)
+		}
+	}
+
 	m.mu.Lock()
 	d, ok := m.sessions[name]
 	m.mu.Unlock()
@@ -209,14 +231,7 @@ func (m *Manager) Down(ctx context.Context, name string, shutdown bool, force bo
 		return nil
 	}
 
-	// Shutdown is VM-only.
-	if !vbox.VMExists(ctx, name) {
-		if ok && d.Type() == "rdp" {
-			return fmt.Errorf("cannot shutdown an RDP target; use 'down' to disconnect")
-		}
-		return fmt.Errorf("desktop %q not found", name)
-	}
-
+	// Shutdown is VM-only — VMExists was checked at the top when shutdown is true.
 	if force {
 		return m.vbox.Poweroff(ctx, name)
 	}
@@ -319,11 +334,23 @@ func (m *Manager) Subscribe(name string) (<-chan SessionEvent, func()) {
 	return ch, cancel
 }
 
+// rdpConnectLock returns a per-desktop mutex used to serialize Connect for a
+// given RDP name so concurrent EnsureRDPConnected callers wait instead of
+// overwriting m.sessions[name] before the first dial finishes.
+func (m *Manager) rdpConnectLock(name string) *sync.Mutex {
+	v, _ := m.rdpConnectMu.LoadOrStore(name, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
 // EnsureRDPConnected connects the named RDP desktop to guacd if a live session
 // does not already exist. It is called on first use — either by the web viewer
 // opening a tunnel or by Up() when the session is not yet live.
 // Callers that need the connection ID should read it after this returns.
 func (m *Manager) EnsureRDPConnected(ctx context.Context, name string) error {
+	cl := m.rdpConnectLock(name)
+	cl.Lock()
+	defer cl.Unlock()
+
 	// Fast path: already connected.
 	if rdp, ok := m.ActiveRDP(name); ok && rdp.GuacdConnectionID() != "" {
 		return nil
@@ -338,10 +365,7 @@ func (m *Manager) EnsureRDPConnected(ctx context.Context, name string) error {
 		return fmt.Errorf("guacd required for RDP: %w", err)
 	}
 
-	// Acquire the lock to do an authoritative check-and-reserve. If another
-	// goroutine already connected while we were starting guacd, use that
-	// session. Otherwise, store the new BringRDP under the lock so no second
-	// goroutine can also proceed to Connect().
+	// Under rdpConnectLock, only one goroutine reaches here per name at a time.
 	m.mu.Lock()
 	if existing, exists := m.sessions[name]; exists {
 		if rdp, ok := existing.(*BringRDP); ok && rdp.Connected() {

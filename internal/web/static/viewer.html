@@ -92,6 +92,8 @@
             window.removeEventListener('resize', currentResizeHandler);
             currentResizeHandler = null;
           }
+          currentClient.onstatechange = null;
+          currentClient.onerror = null;
           currentClient.disconnect();
           currentClient = null;
           currentTunnel = null;
