@@ -361,12 +361,14 @@ func (r *BringRDP) keepAlive(stop <-chan struct{}) {
 				return
 			}
 
-			log.Printf("[rdp %s] session dropped, reconnecting in 5s", r.name)
-			r.mu.Lock()
-			r.live = false
-			r.connID = ""
-			r.done = nil
-			r.mu.Unlock()
+		log.Printf("[rdp %s] session dropped, reconnecting in 5s", r.name)
+		r.mu.Lock()
+		r.live = false
+		r.connID = ""
+		r.done = nil
+		r.client = nil      // release the stopped client so it can be GC'd
+		r.syncTracker = nil // no longer valid after a session drop
+		r.mu.Unlock()
 		}
 
 		// Brief pause before reconnecting (or before retrying a failed reconnect).
@@ -376,7 +378,21 @@ func (r *BringRDP) keepAlive(stop <-chan struct{}) {
 		case <-time.After(5 * time.Second):
 		}
 
-		if err := r.dial(context.Background()); err != nil {
+		// Serialize with Connect so only one goroutine dials at a time.
+		// Double-check after acquiring the lock: Connect may have already
+		// reconnected while we were waiting (e.g. an agent called Connect
+		// during the 5 s back-off window after a session drop).
+		r.connectMu.Lock()
+		r.mu.Lock()
+		needsDial := r.client == nil
+		r.mu.Unlock()
+		var dialErr error
+		if needsDial {
+			dialErr = r.dial(context.Background())
+		}
+		r.connectMu.Unlock()
+
+		if dialErr != nil {
 			dialFailures++
 			// Exponential back-off: 10s, 20s, 40s … capped at 5 minutes.
 			backoff := time.Duration(10<<uint(dialFailures-1)) * time.Second
@@ -384,13 +400,13 @@ func (r *BringRDP) keepAlive(stop <-chan struct{}) {
 				backoff = 5 * time.Minute
 			}
 			log.Printf("[rdp %s] reconnect failed (%d consecutive): %v; retrying in %v",
-				r.name, dialFailures, err, backoff)
+				r.name, dialFailures, dialErr, backoff)
 			select {
 			case <-stop:
 				return
 			case <-time.After(backoff):
 			}
-		} else {
+		} else if needsDial {
 			if dialFailures > 0 {
 				log.Printf("[rdp %s] reconnected after %d failed attempt(s), connID=%s",
 					r.name, dialFailures, r.GuacdConnectionID())
@@ -676,6 +692,12 @@ func typeText(c Client, text string, delay time.Duration, st *syncTracker) error
 
 		if ctrlCode, ok := ctrlKeyCodes[r]; ok {
 			code = ctrlCode
+		} else if r < 0x20 {
+			// Other control characters are not in ctrlKeyCodes and have no
+			// defined keysym mapping that Windows RDP handles correctly.
+			// (\r is already normalised to \n above.)
+			// Use KeyPress for control sequences (e.g. KeyPress("ctrl+a")).
+			return fmt.Errorf("control character U+%04X cannot be typed as text; use KeyPress for control sequences", r)
 		} else {
 			// For all printable ASCII 32–126, KeyCode(r) == the keysym.
 			// guacd maps keysym 65 ('A') → Shift+scancode(a) automatically.

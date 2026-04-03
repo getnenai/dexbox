@@ -515,6 +515,18 @@ func TestTypeText_ShiftSymbolsUseShift(t *testing.T) {
 	}
 }
 
+func TestTypeText_UnknownControlCharReturnsError(t *testing.T) {
+	// Control characters below 0x20 that are not in ctrlKeyCodes should
+	// return an error rather than being cast to a raw keysym.
+	for _, r := range []rune{'\x01', '\x02', '\x03', '\x04', '\x05', '\x10', '\x1c', '\x1f'} {
+		c := &mockClient{}
+		err := typeText(c, string(r), 0, nil)
+		if err == nil {
+			t.Errorf("expected error for control char U+%04X, got nil", r)
+		}
+	}
+}
+
 func TestTypeText_PlainCharUsesExplicitKeyEvents(t *testing.T) {
 	c := &mockClient{}
 	if err := typeText(c, "v", 0, nil); err != nil {
