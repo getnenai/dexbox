@@ -10,7 +10,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/spf13/cobra v1.10.2
 	github.com/wwt/guac v1.3.3
-	golang.org/x/image v0.24.0
+	golang.org/x/image v0.38.0
 )
 
 require (
