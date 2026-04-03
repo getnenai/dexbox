@@ -395,9 +395,19 @@ func (r *BringRDP) keepAlive(stop <-chan struct{}) {
 		if dialErr != nil {
 			dialFailures++
 			// Exponential back-off: 10s, 20s, 40s … capped at 5 minutes.
-			backoff := time.Duration(10<<uint(dialFailures-1)) * time.Second
-			if backoff > 5*time.Minute {
+			// Cap the exponent before shifting: 10<<5 = 320s already exceeds
+			// the 5-minute limit, so any larger shift is both unnecessary and
+			// risks overflowing int64 when multiplied by time.Second.
+			const maxBackoffExp = 4
+			exp := dialFailures - 1
+			var backoff time.Duration
+			if exp > maxBackoffExp {
 				backoff = 5 * time.Minute
+			} else {
+				backoff = time.Duration(10<<uint(exp)) * time.Second
+				if backoff > 5*time.Minute {
+					backoff = 5 * time.Minute
+				}
 			}
 			log.Printf("[rdp %s] reconnect failed (%d consecutive): %v; retrying in %v",
 				r.name, dialFailures, dialErr, backoff)
@@ -429,6 +439,12 @@ func (r *BringRDP) Disconnect() error {
 	if kaStop != nil {
 		close(kaStop)
 	}
+
+	// Acquire connectMu to wait for any in-flight Connect/keepAlive dial to
+	// complete before tearing down the client. This prevents a concurrent
+	// dial from completing after Disconnect returns and leaving a ghost client.
+	r.connectMu.Lock()
+	defer r.connectMu.Unlock()
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
