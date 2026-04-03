@@ -445,8 +445,9 @@ func (r *BringRDP) AgentActive() bool {
 	return r.agentActive
 }
 
-// SetAgentActive marks whether an agent has claimed control of this session.
-// Called by Manager.Up() and Manager.Down().
+// SetAgentActive marks whether an agent currently holds this session.
+// It is intended to be called by the manager when an agent acquires or
+// releases the desktop.
 func (r *BringRDP) SetAgentActive(active bool) {
 	r.mu.Lock()
 	r.agentActive = active
@@ -664,11 +665,6 @@ func typeText(c Client, text string, delay time.Duration, st *syncTracker) error
 			warmupBase := st.gen.Load()
 			st.waitFor(warmupBase+2, 0, 10*time.Second)
 		}
-
-		fi := st.FrameInterval()
-		fps := float64(time.Second) / float64(fi)
-		log.Printf("[typeText] %d chars; frame interval %v (~%.0f fps)",
-			len([]rune(text)), fi.Round(time.Millisecond), fps)
 	}
 
 	// Clear any stale modifier state once before we start typing.
