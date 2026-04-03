@@ -102,20 +102,22 @@ func cmdStart() *cobra.Command {
 			ctx := context.Background()
 
 			// Record our PID so `dexbox stop` can target this process directly.
-			if pidPath, err := dexboxPIDPath(); err != nil {
-				fmt.Printf("Warning: could not resolve PID file path: %v\n", err)
-			} else {
-				pf := pidfile.New(pidPath, "dexbox")
-				if _, err := pf.Write(); err != nil {
-					fmt.Printf("Warning: could not write PID file: %v\n", err)
-				} else {
-					defer func() {
-						if err := pf.Remove(); err != nil {
-							fmt.Printf("Warning: could not remove PID file: %v\n", err)
-						}
-					}()
-				}
+			// PID-file creation is a hard prerequisite: if it fails, another
+			// instance may already be running or the runtime environment is
+			// misconfigured, so we refuse to start.
+			pidPath, err := dexboxPIDPath()
+			if err != nil {
+				return fmt.Errorf("could not resolve PID file path: %w", err)
 			}
+			pf := pidfile.New(pidPath, "dexbox")
+			if _, err := pf.Write(); err != nil {
+				return fmt.Errorf("could not write PID file: %w", err)
+			}
+			defer func() {
+				if err := pf.Remove(); err != nil {
+					fmt.Printf("Warning: could not remove PID file: %v\n", err)
+				}
+			}()
 
 			// vboxwebsrv is optional — skip gracefully when VirtualBox is not
 			// installed (e.g. QEMU-only environments).

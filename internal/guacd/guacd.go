@@ -7,6 +7,7 @@ package guacd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -39,7 +40,11 @@ func Start(ctx context.Context, sharedDir string) error {
 		return err
 	}
 
-	if containerExists(ctx) {
+	exists, err := containerExists(ctx)
+	if err != nil {
+		return fmt.Errorf("check container existence: %w", err)
+	}
+	if exists {
 		if recreated, err := recreateIfMountMissing(ctx, sharedDir); recreated || err != nil {
 			return err
 		}
@@ -54,7 +59,14 @@ func Start(ctx context.Context, sharedDir string) error {
 // Returns (true, nil) when the container was recreated, (false, nil) when
 // no action was needed, and (false, err) on failure.
 func recreateIfMountMissing(ctx context.Context, sharedDir string) (recreated bool, err error) {
-	if sharedDir == "" || containerHasMount(ctx, sharedDir) {
+	if sharedDir == "" {
+		return false, nil
+	}
+	hasMount, err := containerHasMount(ctx, sharedDir)
+	if err != nil {
+		return false, fmt.Errorf("check container mount: %w", err)
+	}
+	if hasMount {
 		return false, nil
 	}
 	log.Printf("guacd: container %s is missing bind mount for %s; removing and recreating", ContainerName, sharedDir)
@@ -66,7 +78,11 @@ func recreateIfMountMissing(ctx context.Context, sharedDir string) (recreated bo
 
 // Stop stops and removes the guacd container.
 func Stop(ctx context.Context) error {
-	if !containerExists(ctx) {
+	exists, err := containerExists(ctx)
+	if err != nil {
+		return fmt.Errorf("check container existence: %w", err)
+	}
+	if !exists {
 		return nil
 	}
 	return run(ctx, "docker", "rm", "--force", ContainerName)
@@ -194,22 +210,40 @@ func DockerAvailable(ctx context.Context) bool {
 }
 
 // containerHasMount reports whether the named container has sharedDir as a
-// bind-mount source.
-func containerHasMount(ctx context.Context, sharedDir string) bool {
+// bind-mount source. Returns an error only for transient failures (e.g. the
+// Docker daemon is unreachable); a missing container is treated as having no
+// mounts and returns (false, nil).
+func containerHasMount(ctx context.Context, sharedDir string) (bool, error) {
 	out, err := output(ctx, "docker", "inspect", "--format", "{{range .Mounts}}{{.Source}}\n{{end}}", ContainerName)
 	if err != nil {
-		return false
+		// A "No such container" exit means the container is simply absent —
+		// not a daemon failure that the caller needs to handle as an error.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "No such container") {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect container %s mounts: %w", ContainerName, err)
 	}
 	for _, line := range strings.Split(out, "\n") {
 		if strings.TrimSpace(line) == sharedDir {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
-func containerExists(ctx context.Context) bool {
-	return run(ctx, "docker", "inspect", ContainerName) == nil
+func containerExists(ctx context.Context) (bool, error) {
+	_, err := output(ctx, "docker", "inspect", ContainerName)
+	if err == nil {
+		return true, nil
+	}
+	// "No such container" is not an error; the container is simply absent.
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "No such container") {
+		return false, nil
+	}
+	// Any other failure (daemon unreachable, timeout, etc.) is a real error.
+	return false, err
 }
 
 func startExisting(ctx context.Context) error {
