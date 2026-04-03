@@ -27,6 +27,11 @@ type RDPConfig struct {
 	// "Shared on Dexbox"). Defaults to "Shared" when blank.
 	DriveEnabled bool   `json:"drive_enabled,omitempty"`
 	DriveName    string `json:"drive_name,omitempty"`
+	// KeyDelayMs controls the inter-keystroke pause used by TypeText.
+	//   unset / 0  use the default delay (50 ms) — recommended for reliability
+	//   > 0        use exactly that many milliseconds
+	//   < 0        invalid; TypeText returns an error
+	KeyDelayMs int `json:"key_delay_ms,omitempty"`
 }
 
 // ConnectionStore persists RDP connection configs to ~/.dexbox/connections.json.
