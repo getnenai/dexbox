@@ -26,6 +26,19 @@ const (
 	ContainerMount = "/guacd-shared"
 )
 
+// dockerInspectNotFound reports whether err is Docker's "this object does not exist"
+// exit from `docker inspect`. Modern Docker prints "no such object"; older
+// clients used "No such container". Without this, a missing dexbox-guacd is
+// mistaken for a fatal daemon error and guacd never starts.
+func dockerInspectNotFound(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || len(exitErr.Stderr) == 0 {
+		return false
+	}
+	s := strings.ToLower(string(exitErr.Stderr))
+	return strings.Contains(s, "no such container") || strings.Contains(s, "no such object")
+}
+
 // Start launches the guacd Docker container. Idempotent: if the container
 // is already running with the correct bind mount, this is a no-op. If the
 // container exists but is missing the required sharedDir mount, it is
@@ -231,10 +244,7 @@ func DockerAvailable(ctx context.Context) bool {
 func containerHasMount(ctx context.Context, sharedDir string) (bool, error) {
 	out, err := output(ctx, "docker", "inspect", "--format", "{{range .Mounts}}{{.Source}}\n{{end}}", ContainerName)
 	if err != nil {
-		// A "No such container" exit means the container is simply absent —
-		// not a daemon failure that the caller needs to handle as an error.
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "No such container") {
+		if dockerInspectNotFound(err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("inspect container %s mounts: %w", ContainerName, err)
@@ -252,9 +262,7 @@ func containerExists(ctx context.Context) (bool, error) {
 	if err == nil {
 		return true, nil
 	}
-	// "No such container" is not an error; the container is simply absent.
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "No such container") {
+	if dockerInspectNotFound(err) {
 		return false, nil
 	}
 	// Any other failure (daemon unreachable, timeout, etc.) is a real error.
