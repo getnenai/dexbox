@@ -104,6 +104,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /desktops/down-all", s.handleDownAll)
 	mux.HandleFunc("GET /desktops/{name}", s.handleGetDesktop)
 	mux.HandleFunc("POST /desktops/{name}", s.handleDesktopAction)
+	mux.HandleFunc("POST /desktops/{name}/tool", s.handleDesktopTool)
 	mux.HandleFunc("DELETE /desktops/{name}", s.handleDeleteDesktop)
 
 	// Browser UI (view/tunnel/events).
@@ -129,7 +130,7 @@ func (s *Server) Run() error {
 		})
 	})
 
-	// Auto-connect running VMs so agents can use them immediately.
+	// Auto-connect running VMs so agents can use them immediately after startup.
 	go func() {
 		listCtx, listCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer listCancel()
@@ -754,6 +755,64 @@ func (s *Server) handleDesktopAction(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteDesktop(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	s.deleteDesktop(w, r.Context(), name)
+}
+
+// handleDesktopTool handles POST /desktops/{name}/tool.
+// It accepts a simple JSON body: {"action":"type","text":"..."} or
+// {"action":"key","key":"..."} and dispatches directly through the
+// server's managed desktop connection.  The desktop must already be
+// up (call POST /desktops/{name}?action=up first).
+func (s *Server) handleDesktopTool(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	name := r.PathValue("name")
+
+	var body struct {
+		Action string `json:"action"`
+		Text   string `json:"text"`
+		Key    string `json:"key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad_request", "message": err.Error()})
+		return
+	}
+
+	d, ok := s.desktops.Get(name)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"error":   "not_found",
+			"message": fmt.Sprintf("desktop %q is not connected; call POST /desktops/%s?action=up first", name, name),
+		})
+		return
+	}
+
+	switch body.Action {
+	case "type":
+		if body.Text == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad_request", "message": "missing required field: text"})
+			return
+		}
+		if err := d.TypeText(ctx, body.Text); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "tool_error", "message": err.Error()})
+			return
+		}
+	case "key":
+		if body.Key == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad_request", "message": "missing required field: key"})
+			return
+		}
+		if err := d.KeyPress(ctx, body.Key); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "tool_error", "message": err.Error()})
+			return
+		}
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": fmt.Sprintf("unknown action %q; supported: type, key", body.Action),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // getDesktopStatus returns the status of a single desktop.
