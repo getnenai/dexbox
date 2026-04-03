@@ -2,6 +2,7 @@ package pidfile_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,7 +31,7 @@ func TestWrite_CreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("could not read PID file: %v", err)
 	}
-	pid, err := strconv.Atoi(string(data[:len(data)-1])) // strip newline
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
 		t.Fatalf("PID file content is not an integer: %q", data)
 	}
@@ -72,13 +73,22 @@ func TestWrite_FailsWhenLiveProcessHoldsFile(t *testing.T) {
 }
 
 func TestWrite_RecoversStalePIDFile(t *testing.T) {
+	// Spawn a subprocess and wait for it to exit so we have a PID that is
+	// guaranteed dead by the time Write is called.
+	cmd := exec.Command("sleep", "0")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start subprocess: %v", err)
+	}
+	stalePID := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("subprocess exited with error: %v", err)
+	}
+
 	path := tempPIDPath(t)
-	// Pre-create a stale file containing a PID that is certainly dead.
-	_ = os.WriteFile(path, []byte("99999999\n"), 0o600)
+	_ = os.WriteFile(path, []byte(strconv.Itoa(stalePID)+"\n"), 0o600)
 
 	f := pidfile.New(path, "test")
-	_, err := f.Write()
-	if err != nil {
+	if _, err := f.Write(); err != nil {
 		t.Fatalf("Write failed on stale file: %v", err)
 	}
 }

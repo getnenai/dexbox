@@ -60,10 +60,11 @@ func (f *File) Write() (string, error) {
 		// before deciding to remove it.
 		if data, readErr := os.ReadFile(f.path); readErr == nil {
 			if existingPID, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil && existingPID > 0 {
-				if proc, findErr := os.FindProcess(existingPID); findErr == nil {
-					if proc.Signal(syscall.Signal(0)) == nil && f.ProcessName(existingPID) {
-						return "", fmt.Errorf("PID file %s: process %d is already running", f.path, existingPID)
-					}
+				// On Unix, os.FindProcess never returns an error; liveness is
+				// determined by proc.Signal(0).
+				proc, _ := os.FindProcess(existingPID)
+				if proc.Signal(syscall.Signal(0)) == nil && f.ProcessName(existingPID) {
+					return "", fmt.Errorf("PID file %s: process %d is already running", f.path, existingPID)
 				}
 			}
 		}
@@ -90,10 +91,9 @@ func (f *File) Stop(gracePeriod time.Duration) bool {
 	if err != nil || pid <= 0 {
 		return false
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
+	// On Unix, os.FindProcess never returns an error; liveness is determined
+	// by proc.Signal(0).
+	proc, _ := os.FindProcess(pid)
 	// Signal 0 checks liveness without actually signalling the process.
 	if proc.Signal(syscall.Signal(0)) != nil {
 		_ = os.Remove(f.path)
