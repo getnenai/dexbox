@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -33,6 +34,7 @@ import (
 	"github.com/getnenai/dexbox/internal/desktop"
 	"github.com/getnenai/dexbox/internal/guacd"
 	"github.com/getnenai/dexbox/internal/mcpserver"
+	"github.com/getnenai/dexbox/internal/pid"
 	"github.com/getnenai/dexbox/internal/server"
 	"github.com/getnenai/dexbox/internal/vbox"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -100,11 +102,22 @@ func cmdStart() *cobra.Command {
 			ctx := context.Background()
 
 			// Record our PID so `dexbox stop` can target this process directly.
-			if err := writePIDFile(dexboxPIDFile); err != nil {
-				fmt.Printf("Warning: could not write PID file: %v\n", err)
-			} else {
-				defer os.Remove(dexboxPIDFile)
+			// PID-file creation is a hard prerequisite: if it fails, another
+			// instance may already be running or the runtime environment is
+			// misconfigured, so we refuse to start.
+			pidPath, err := dexboxPIDPath()
+			if err != nil {
+				return fmt.Errorf("could not resolve PID file path: %w", err)
 			}
+			pf := pid.New(pidPath, "dexbox start")
+			if _, err := pf.Write(); err != nil {
+				return fmt.Errorf("could not write PID file: %w", err)
+			}
+			defer func() {
+				if err := pf.Remove(); err != nil {
+					fmt.Printf("Warning: could not remove PID file: %v\n", err)
+				}
+			}()
 
 			// vboxwebsrv is optional — skip gracefully when VirtualBox is not
 			// installed (e.g. QEMU-only environments).
@@ -203,7 +216,11 @@ func cmdStop() *cobra.Command {
 			ctx := context.Background()
 
 			fmt.Println("Stopping dexbox server...")
-			if !stopByPIDFile() {
+			stopped := false
+			if pidPath, err := dexboxPIDPath(); err == nil {
+				stopped = pid.New(pidPath, "dexbox start").Stop(5 * time.Second)
+			}
+			if !stopped {
 				// Fall back when PID file is missing or stale.
 				_ = exec.Command("pkill", "-f", "dexbox start").Run()
 				deadline := time.Now().Add(5 * time.Second)
@@ -264,49 +281,15 @@ func waitForPort(port string, timeout time.Duration) error {
 // PID file helpers
 // ---------------------------------------------------------------------------
 
-const dexboxPIDFile = "/tmp/dexbox.pid"
-
-// writePIDFile writes the current process PID to path.
-func writePIDFile(path string) error {
-	return os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
-}
-
-// stopByPIDFile reads the PID file, sends SIGTERM to the recorded process,
-// waits up to 5 seconds for it to exit, then escalates to SIGKILL.
-// Returns true if the process was found and signalled; false when the PID
-// file is absent, unreadable, or the recorded PID is already gone.
-func stopByPIDFile() bool {
-	data, err := os.ReadFile(dexboxPIDFile)
+// dexboxPIDPath returns the path of the PID file, inside a user-scoped
+// directory (~/.dexbox/dexbox.pid) that is not world-writable, eliminating
+// the symlink-attack surface of a shared /tmp location.
+func dexboxPIDPath() (string, error) {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return false
+		return "", fmt.Errorf("home directory: %w", err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// Signal 0 checks liveness without actually signalling the process.
-	if proc.Signal(syscall.Signal(0)) != nil {
-		_ = os.Remove(dexboxPIDFile)
-		return false
-	}
-	_ = proc.Signal(syscall.SIGTERM)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if proc.Signal(syscall.Signal(0)) != nil {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	// Escalate if still alive after the grace period.
-	if proc.Signal(syscall.Signal(0)) == nil {
-		_ = proc.Kill()
-	}
-	_ = os.Remove(dexboxPIDFile)
-	return true
+	return filepath.Join(home, ".dexbox", "dexbox.pid"), nil
 }
 
 // ---------------------------------------------------------------------------

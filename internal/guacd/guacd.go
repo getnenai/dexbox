@@ -7,6 +7,7 @@ package guacd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -35,20 +36,17 @@ func Start(ctx context.Context, sharedDir string) error {
 		return err
 	}
 	if running {
-		if sharedDir != "" && !containerHasMount(ctx, sharedDir) {
-			log.Printf("guacd: container %s is missing bind mount for %s; removing and recreating", ContainerName, sharedDir)
-			_ = run(ctx, "docker", "stop", ContainerName)
-			_ = run(ctx, "docker", "rm", "--force", ContainerName)
-			return createAndStart(ctx, sharedDir)
-		}
-		return nil
+		_, err := recreateIfMountMissing(ctx, sharedDir)
+		return err
 	}
 
-	if containerExists(ctx) {
-		if sharedDir != "" && !containerHasMount(ctx, sharedDir) {
-			log.Printf("guacd: container %s is missing bind mount for %s; removing and recreating", ContainerName, sharedDir)
-			_ = run(ctx, "docker", "rm", "--force", ContainerName)
-			return createAndStart(ctx, sharedDir)
+	exists, err := containerExists(ctx)
+	if err != nil {
+		return fmt.Errorf("check container existence: %w", err)
+	}
+	if exists {
+		if recreated, err := recreateIfMountMissing(ctx, sharedDir); recreated || err != nil {
+			return err
 		}
 		return startExisting(ctx)
 	}
@@ -56,14 +54,38 @@ func Start(ctx context.Context, sharedDir string) error {
 	return createAndStart(ctx, sharedDir)
 }
 
+// recreateIfMountMissing removes and recreates the guacd container when
+// sharedDir is required but the container lacks the bind mount.
+// Returns (true, nil) when the container was recreated, (false, nil) when
+// no action was needed, and (false, err) on failure.
+func recreateIfMountMissing(ctx context.Context, sharedDir string) (recreated bool, err error) {
+	if sharedDir == "" {
+		return false, nil
+	}
+	hasMount, err := containerHasMount(ctx, sharedDir)
+	if err != nil {
+		return false, fmt.Errorf("check container mount: %w", err)
+	}
+	if hasMount {
+		return false, nil
+	}
+	log.Printf("guacd: container %s is missing bind mount for %s; removing and recreating", ContainerName, sharedDir)
+	if err := run(ctx, "docker", "rm", "--force", ContainerName); err != nil {
+		return false, fmt.Errorf("guacd: remove container %s before recreate: %w", ContainerName, err)
+	}
+	return true, createAndStart(ctx, sharedDir)
+}
+
 // Stop stops and removes the guacd container.
 func Stop(ctx context.Context) error {
-	if !containerExists(ctx) {
+	exists, err := containerExists(ctx)
+	if err != nil {
+		return fmt.Errorf("check container existence: %w", err)
+	}
+	if !exists {
 		return nil
 	}
-	_ = run(ctx, "docker", "stop", ContainerName)
-	_ = run(ctx, "docker", "rm", "--force", ContainerName)
-	return nil
+	return run(ctx, "docker", "rm", "--force", ContainerName)
 }
 
 // IsRunning reports whether the guacd container is running.
@@ -158,11 +180,27 @@ func StopNative() {
 //  2. Native binary (Homebrew libexec or PATH)
 //  3. Docker container (with optional sharedDir bind mount)
 func EnsureRunning(ctx context.Context, sharedDir string) error {
-	if IsListening() && sharedDir == "" {
+	if IsListening() {
+		// Something is already accepting connections. When sharedDir is
+		// required, verify that the managed Docker container has the correct
+		// bind mount — it may need to be recreated if sharedDir changed since
+		// the container was last started. Skip this check for native binaries
+		// or externally-managed instances (no Docker container to inspect).
+		if sharedDir != "" && DockerAvailable(ctx) {
+			exists, err := containerExists(ctx)
+			if err != nil {
+				return fmt.Errorf("check container existence: %w", err)
+			}
+			if exists {
+				_, err := recreateIfMountMissing(ctx, sharedDir)
+				return err
+			}
+		}
 		return nil
 	}
 
-	// Try native binary first (no sharedDir support for native yet)
+	// Try native binary when no sharedDir is required (native guacd does not
+	// support bind mounts). This path works regardless of Docker availability.
 	if sharedDir == "" {
 		if bin := FindNativeBinary(); bin != "" {
 			log.Printf("[guacd] found native binary: %s", bin)
@@ -171,6 +209,10 @@ func EnsureRunning(ctx context.Context, sharedDir string) error {
 			}
 			log.Printf("[guacd] native binary failed, falling back to Docker")
 		}
+	}
+
+	if !DockerAvailable(ctx) {
+		return fmt.Errorf("docker is not available and guacd is not listening on %s", DefaultAddr)
 	}
 
 	// Fall back to Docker
@@ -183,22 +225,40 @@ func DockerAvailable(ctx context.Context) bool {
 }
 
 // containerHasMount reports whether the named container has sharedDir as a
-// bind-mount source.
-func containerHasMount(ctx context.Context, sharedDir string) bool {
+// bind-mount source. Returns an error only for transient failures (e.g. the
+// Docker daemon is unreachable); a missing container is treated as having no
+// mounts and returns (false, nil).
+func containerHasMount(ctx context.Context, sharedDir string) (bool, error) {
 	out, err := output(ctx, "docker", "inspect", "--format", "{{range .Mounts}}{{.Source}}\n{{end}}", ContainerName)
 	if err != nil {
-		return false
+		// A "No such container" exit means the container is simply absent —
+		// not a daemon failure that the caller needs to handle as an error.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "No such container") {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect container %s mounts: %w", ContainerName, err)
 	}
 	for _, line := range strings.Split(out, "\n") {
 		if strings.TrimSpace(line) == sharedDir {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
-func containerExists(ctx context.Context) bool {
-	return run(ctx, "docker", "inspect", ContainerName) == nil
+func containerExists(ctx context.Context) (bool, error) {
+	_, err := output(ctx, "docker", "inspect", ContainerName)
+	if err == nil {
+		return true, nil
+	}
+	// "No such container" is not an error; the container is simply absent.
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "No such container") {
+		return false, nil
+	}
+	// Any other failure (daemon unreachable, timeout, etc.) is a real error.
+	return false, err
 }
 
 func startExisting(ctx context.Context) error {
