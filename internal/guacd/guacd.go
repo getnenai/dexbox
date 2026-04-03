@@ -59,7 +59,7 @@ func recreateIfMountMissing(ctx context.Context, sharedDir string) (recreated bo
 	}
 	log.Printf("guacd: container %s is missing bind mount for %s; removing and recreating", ContainerName, sharedDir)
 	if err := run(ctx, "docker", "rm", "--force", ContainerName); err != nil {
-		log.Printf("guacd: failed to remove container %s before recreate: %v", ContainerName, err)
+		return false, fmt.Errorf("guacd: remove container %s before recreate: %w", ContainerName, err)
 	}
 	return true, createAndStart(ctx, sharedDir)
 }
@@ -164,14 +164,12 @@ func StopNative() {
 //  2. Native binary (Homebrew libexec or PATH)
 //  3. Docker container (with optional sharedDir bind mount)
 func EnsureRunning(ctx context.Context, sharedDir string) error {
-	if !DockerAvailable(ctx) {
-		if IsListening() {
-			return nil
-		}
-		return fmt.Errorf("docker is not available and guacd is not listening on %s", DefaultAddr)
+	if IsListening() {
+		return nil
 	}
 
-	// Try native binary first (no sharedDir support for native yet)
+	// Try native binary when no sharedDir is required (native guacd does not
+	// support bind mounts). This path works regardless of Docker availability.
 	if sharedDir == "" {
 		if bin := FindNativeBinary(); bin != "" {
 			log.Printf("[guacd] found native binary: %s", bin)
@@ -180,6 +178,10 @@ func EnsureRunning(ctx context.Context, sharedDir string) error {
 			}
 			log.Printf("[guacd] native binary failed, falling back to Docker")
 		}
+	}
+
+	if !DockerAvailable(ctx) {
+		return fmt.Errorf("docker is not available and guacd is not listening on %s", DefaultAddr)
 	}
 
 	// Fall back to Docker
