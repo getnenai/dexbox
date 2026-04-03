@@ -181,6 +181,21 @@ func StopNative() {
 //  3. Docker container (with optional sharedDir bind mount)
 func EnsureRunning(ctx context.Context, sharedDir string) error {
 	if IsListening() {
+		// Something is already accepting connections. When sharedDir is
+		// required, verify that the managed Docker container has the correct
+		// bind mount — it may need to be recreated if sharedDir changed since
+		// the container was last started. Skip this check for native binaries
+		// or externally-managed instances (no Docker container to inspect).
+		if sharedDir != "" && DockerAvailable(ctx) {
+			exists, err := containerExists(ctx)
+			if err != nil {
+				return fmt.Errorf("check container existence: %w", err)
+			}
+			if exists {
+				_, err := recreateIfMountMissing(ctx, sharedDir)
+				return err
+			}
+		}
 		return nil
 	}
 
