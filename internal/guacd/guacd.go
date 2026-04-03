@@ -108,7 +108,10 @@ func IsRunning(ctx context.Context) (bool, error) {
 	}
 	out, err := output(ctx, "docker", "inspect", "--format", "{{.State.Running}}", ContainerName)
 	if err != nil {
-		return false, nil // container doesn't exist
+		if dockerInspectNotFound(err) {
+			return false, nil
+		}
+		return false, err
 	}
 	return strings.TrimSpace(out) == "true", nil
 }
