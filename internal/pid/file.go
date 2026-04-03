@@ -1,9 +1,9 @@
-// Package pidfile manages a PID file for a named daemon process.
+// Package pid manages a PID file for a named daemon process.
 //
 // It provides atomic creation (O_CREATE|O_EXCL), stale-file recovery,
 // process-identity verification, and graceful SIGTERM→SIGKILL shutdown.
 // The parent directory is created with mode 0700 if absent.
-package pidfile
+package pid
 
 import (
 	"errors"
@@ -36,8 +36,8 @@ func New(path, name string) *File {
 // if it contains a live PID whose process name matches f.name, Write returns
 // an error indicating the daemon is already running; if the process is dead
 // or the name does not match, the stale file is removed and the write is
-// retried once. Returns the resolved path so the caller can defer Remove on
-// success.
+// retried (up to two additional attempts). Returns the resolved path so the
+// caller can defer Remove on success.
 func (f *File) Write() (string, error) {
 	if err := os.MkdirAll(filepath.Dir(f.path), 0o700); err != nil {
 		return "", fmt.Errorf("create PID dir: %w", err)
@@ -136,23 +136,55 @@ func (f *File) Remove() error {
 	return nil
 }
 
-// ProcessName returns true if the process with the given PID has an
-// executable basename that exactly matches f.name (case-insensitive).
+// ProcessName returns true if the process with the given PID has a command
+// line that matches f.name (case-insensitive). f.name may contain spaces to
+// include subcommand tokens (e.g. "dexbox start"): all tokens are checked
+// positionally against the process argv. The first token is compared against
+// the executable basename; subsequent tokens must match the corresponding argv
+// positions exactly.
+//
 // On Linux it reads /proc/<pid>/cmdline; on other platforms it falls back to
-// "ps -p <pid> -o comm=" to get the command name.
+// "ps -p <pid> -o args=" to obtain the full argument list.
 func (f *File) ProcessName(pid int) bool {
+	expected := strings.Fields(f.name)
+	if len(expected) == 0 {
+		return false
+	}
+
+	var tokens []string
+
 	// Try /proc first (Linux).
 	cmdlineFile := fmt.Sprintf("/proc/%d/cmdline", pid)
 	if data, err := os.ReadFile(cmdlineFile); err == nil {
-		// /proc/<pid>/cmdline is NUL-separated; only the first token is the exe.
-		name := strings.SplitN(string(data), "\x00", 2)[0]
-		return strings.EqualFold(filepath.Base(name), f.name)
+		// /proc/<pid>/cmdline is NUL-separated; strip the trailing empty token.
+		parts := strings.Split(string(data), "\x00")
+		for len(parts) > 0 && parts[len(parts)-1] == "" {
+			parts = parts[:len(parts)-1]
+		}
+		tokens = parts
+	} else {
+		// Fallback: ask ps for the full argument list (macOS / BSD).
+		// ps -o args= may return a full path; we take filepath.Base of the
+		// first token to normalise it.
+		out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "args=").Output()
+		if err != nil {
+			return false
+		}
+		tokens = strings.Fields(strings.TrimSpace(string(out)))
 	}
-	// Fallback: ask ps for the command name (macOS / BSD).
-	// ps -o comm= may return a full path on some platforms; take the basename.
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-	if err != nil {
+
+	if len(tokens) < len(expected) {
 		return false
 	}
-	return strings.EqualFold(filepath.Base(strings.TrimSpace(string(out))), f.name)
+	// First token: compare executable basenames.
+	if !strings.EqualFold(filepath.Base(tokens[0]), expected[0]) {
+		return false
+	}
+	// Remaining tokens: positional exact match.
+	for i, exp := range expected[1:] {
+		if !strings.EqualFold(tokens[i+1], exp) {
+			return false
+		}
+	}
+	return true
 }

@@ -34,7 +34,7 @@ import (
 	"github.com/getnenai/dexbox/internal/desktop"
 	"github.com/getnenai/dexbox/internal/guacd"
 	"github.com/getnenai/dexbox/internal/mcpserver"
-	"github.com/getnenai/dexbox/internal/pidfile"
+	"github.com/getnenai/dexbox/internal/pid"
 	"github.com/getnenai/dexbox/internal/server"
 	"github.com/getnenai/dexbox/internal/vbox"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -109,7 +109,7 @@ func cmdStart() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("could not resolve PID file path: %w", err)
 			}
-			pf := pidfile.New(pidPath, "dexbox")
+			pf := pid.New(pidPath, "dexbox start")
 			if _, err := pf.Write(); err != nil {
 				return fmt.Errorf("could not write PID file: %w", err)
 			}
@@ -218,7 +218,7 @@ func cmdStop() *cobra.Command {
 			fmt.Println("Stopping dexbox server...")
 			stopped := false
 			if pidPath, err := dexboxPIDPath(); err == nil {
-				stopped = pidfile.New(pidPath, "dexbox").Stop(5 * time.Second)
+				stopped = pid.New(pidPath, "dexbox start").Stop(5 * time.Second)
 			}
 			if !stopped {
 				// Fall back when PID file is missing or stale.

@@ -1,4 +1,4 @@
-package pidfile_test
+package pid_test
 
 import (
 	"os"
@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/getnenai/dexbox/internal/pidfile"
+	"github.com/getnenai/dexbox/internal/pid"
 )
 
 // tempPIDPath returns a path inside a fresh temp directory that is cleaned
@@ -23,7 +23,7 @@ func tempPIDPath(t *testing.T) string {
 // --- Write -----------------------------------------------------------------
 
 func TestWrite_CreatesFile(t *testing.T) {
-	f := pidfile.New(tempPIDPath(t), "test")
+	f := pid.New(tempPIDPath(t), "test")
 	path, err := f.Write()
 	if err != nil {
 		t.Fatalf("Write returned error: %v", err)
@@ -32,17 +32,17 @@ func TestWrite_CreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("could not read PID file: %v", err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	p, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
 		t.Fatalf("PID file content is not an integer: %q", data)
 	}
-	if pid != os.Getpid() {
-		t.Errorf("expected PID %d, got %d", os.Getpid(), pid)
+	if p != os.Getpid() {
+		t.Errorf("expected PID %d, got %d", os.Getpid(), p)
 	}
 }
 
 func TestWrite_SetsPermissions(t *testing.T) {
-	f := pidfile.New(tempPIDPath(t), "test")
+	f := pid.New(tempPIDPath(t), "test")
 	path, err := f.Write()
 	if err != nil {
 		t.Fatalf("Write returned error: %v", err)
@@ -65,7 +65,7 @@ func TestWrite_FailsWhenLiveProcessHoldsFile(t *testing.T) {
 	}
 	name := filepath.Base(exe)
 
-	f := pidfile.New(tempPIDPath(t), name)
+	f := pid.New(tempPIDPath(t), name)
 	if _, err := f.Write(); err != nil {
 		t.Fatalf("first Write failed: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestWrite_RecoversStalePIDFile(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	f := pidfile.New(path, "test")
+	f := pid.New(path, "test")
 	if _, err := f.Write(); err != nil {
 		t.Fatalf("Write failed on stale file: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestWrite_RecoversStalePIDFile(t *testing.T) {
 // --- Remove ----------------------------------------------------------------
 
 func TestRemove_DeletesFile(t *testing.T) {
-	f := pidfile.New(tempPIDPath(t), "test")
+	f := pid.New(tempPIDPath(t), "test")
 	path, err := f.Write()
 	if err != nil {
 		t.Fatalf("Write: %v", err)
@@ -119,7 +119,7 @@ func TestRemove_DeletesFile(t *testing.T) {
 }
 
 func TestRemove_NoErrorWhenAbsent(t *testing.T) {
-	f := pidfile.New(tempPIDPath(t), "test")
+	f := pid.New(tempPIDPath(t), "test")
 	if err := f.Remove(); err != nil {
 		t.Fatalf("Remove on absent file: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestRemove_NoErrorWhenAbsent(t *testing.T) {
 // --- Stop ------------------------------------------------------------------
 
 func TestStop_ReturnsFalse_WhenFileAbsent(t *testing.T) {
-	f := pidfile.New(tempPIDPath(t), "test")
+	f := pid.New(tempPIDPath(t), "test")
 	// No file written — Stop should return false immediately.
 	if f.Stop(0) {
 		t.Error("Stop returned true when PID file does not exist")
@@ -141,7 +141,7 @@ func TestStop_ReturnsFalse_WhenFileHasInvalidContent(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	f := pidfile.New(path, "test")
+	f := pid.New(path, "test")
 	if f.Stop(0) {
 		t.Error("Stop returned true for a PID file with non-numeric content")
 	}
@@ -155,7 +155,7 @@ func TestStop_ReturnsFalse_AndRemovesFile_WhenProcessNameMismatches(t *testing.T
 	}
 
 	// Use a name that will never match the test binary.
-	f := pidfile.New(path, "zzz-no-such-process-name-zzz")
+	f := pid.New(path, "zzz-no-such-process-name-zzz")
 	if f.Stop(0) {
 		t.Error("Stop returned true when process name does not match")
 	}
@@ -181,7 +181,7 @@ func TestStop_ReturnsTrue_AndRemovesFile_WhenProcessTerminated(t *testing.T) {
 	}
 
 	// "sleep" is the exact basename of the subprocess we spawned.
-	f := pidfile.New(path, "sleep")
+	f := pid.New(path, "sleep")
 	if !f.Stop(5 * time.Second) {
 		t.Fatal("Stop returned false, expected true for a live matching process")
 	}
@@ -198,23 +198,23 @@ func TestStop_ReturnsTrue_AndRemovesFile_WhenProcessTerminated(t *testing.T) {
 	}
 }
 
+// --- ProcessName -----------------------------------------------------------
+
 func TestProcessName_MatchesCurrentProcess(t *testing.T) {
-	// The test binary name contains the package path component "pidfile" so we
-	// use a fragment that is guaranteed to appear in os.Executable().
 	exe, err := os.Executable()
 	if err != nil {
 		t.Skip("cannot determine test executable name:", err)
 	}
 	base := filepath.Base(exe)
 
-	f := pidfile.New(tempPIDPath(t), base)
+	f := pid.New(tempPIDPath(t), base)
 	if !f.ProcessName(os.Getpid()) {
 		t.Errorf("ProcessName returned false for own PID with name %q", base)
 	}
 }
 
 func TestProcessName_ReturnsFalseForDeadPID(t *testing.T) {
-	f := pidfile.New(tempPIDPath(t), "test")
+	f := pid.New(tempPIDPath(t), "test")
 	// PID 99999999 almost certainly doesn't exist.
 	if f.ProcessName(99999999) {
 		t.Error("ProcessName returned true for a PID that should not exist")
@@ -222,7 +222,7 @@ func TestProcessName_ReturnsFalseForDeadPID(t *testing.T) {
 }
 
 func TestProcessName_ReturnsFalseForWrongName(t *testing.T) {
-	f := pidfile.New(tempPIDPath(t), "zzz-no-such-process-name-zzz")
+	f := pid.New(tempPIDPath(t), "zzz-no-such-process-name-zzz")
 	// Our own PID exists but the name won't match.
 	if f.ProcessName(os.Getpid()) {
 		t.Error("ProcessName returned true for wrong process name")
