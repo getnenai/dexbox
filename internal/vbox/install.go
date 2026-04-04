@@ -16,6 +16,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/getnenai/dexbox/internal/config"
 )
 
 //go:embed autounattend.xml
@@ -317,6 +319,12 @@ func unattendedInstall(ctx context.Context, vmName, isoPath string) error {
 	defer os.RemoveAll(stageDir)
 
 	xmlData := append([]byte(nil), autounattendXML...)
+	
+	// Substitute dynamic credentials into autounattend.xml.
+	xmlData = bytes.ReplaceAll(xmlData, []byte("<Username>dexbox</Username>"), []byte(fmt.Sprintf("<Username>%s</Username>", config.VMUser)))
+	xmlData = bytes.ReplaceAll(xmlData, []byte("<Name>dexbox</Name>"), []byte(fmt.Sprintf("<Name>%s</Name>", config.VMUser)))
+	xmlData = bytes.ReplaceAll(xmlData, []byte("<Value>dexbox123</Value>"), []byte(fmt.Sprintf("<Value>%s</Value>", config.VMPass)))
+
 	if nativeArch() == "arm64" {
 		xmlData = bytes.ReplaceAll(xmlData,
 			[]byte(`processorArchitecture="amd64"`),
@@ -381,8 +389,12 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 		"REM Wait for ARM drivers to finish initializing\r\n"+
 		"timeout /t 10 /nobreak\r\n"+
 		"for %%%%d in (D E F G H) do if exist %%%%d:\\%s %%%%d:\\%s /S\r\n"+
+		"REM Ensure user is in the Administrators group\r\n"+
+		"net localgroup administrators %s /add\r\n"+
+		"REM Re-enable UAC now that Guest Additions are installed\r\n"+
+		"reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System /v EnableLUA /t REG_DWORD /d 1 /f\r\n"+
 		"shutdown /r /t 30\r\n",
-		certTool, gaExe, gaExe)
+		certTool, gaExe, gaExe, config.VMUser)
 	if err := os.WriteFile(filepath.Join(stageDir, "SetupComplete.cmd"), []byte(setupScript), 0o644); err != nil {
 		return err
 	}
