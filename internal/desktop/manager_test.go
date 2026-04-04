@@ -406,6 +406,19 @@ func TestManagerUp_RDP_DriveEnabled_GuacdListening(t *testing.T) {
 	}
 	defer l.Close()
 
+	// Close each accepted connection immediately. Without this, bring.Client
+	// blocks indefinitely in its Guacamole handshake read and cleanup() in
+	// dial() cannot drain the done channel.
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
 	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
 	_ = store.Add("rdp-drive", RDPConfig{
 		Host:         "127.0.0.1",
