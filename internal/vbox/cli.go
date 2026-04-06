@@ -17,7 +17,14 @@ import (
 // Stderr is wrapped in the returned error on non-zero exit. A 30-second timeout
 // is applied to prevent hanging indefinitely.
 func RunVBoxManage(ctx context.Context, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	return runVBoxManageTimeout(ctx, 30*time.Second, args...)
+}
+
+// runVBoxManageTimeout is the shared implementation for RunVBoxManage with a
+// caller-specified timeout. Long-running operations (e.g. clonevm) use this
+// directly with a larger deadline.
+func runVBoxManageTimeout(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "VBoxManage", args...)
@@ -269,6 +276,15 @@ func CreateVM(ctx context.Context, name string, cfg VMConfig) error {
 	}
 
 	return nil
+}
+
+// CloneVM clones an existing VM to create a new one. The source must be
+// powered off or aborted. VBoxManage handles disk cloning, UUID regeneration,
+// and MAC address regeneration automatically. A 5-minute timeout is used
+// because cloning a large VDI can exceed the default 30 seconds.
+func CloneVM(ctx context.Context, src, dst string) error {
+	_, err := runVBoxManageTimeout(ctx, 5*time.Minute, "clonevm", src, "--name", dst, "--register")
+	return err
 }
 
 // setupEFIBootDVD initialises the OVMF NVRAM variable store and injects

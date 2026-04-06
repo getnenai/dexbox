@@ -123,6 +123,65 @@ func Install(ctx context.Context, vmName, isoPath string) error {
 	return nil
 }
 
+// Clone creates a new VM by cloning an existing one. The source VM must be
+// powered off. This takes seconds instead of the 15-30 minute Install() flow.
+func Clone(ctx context.Context, srcVM, dstVM string) error {
+	// Check/install VirtualBox
+	if err := ensureVirtualBox(); err != nil {
+		return fmt.Errorf("VirtualBox installation: %w", err)
+	}
+
+	// Validate source VM exists and is powered off
+	if !VMExists(ctx, srcVM) {
+		return fmt.Errorf("source VM %q does not exist", srcVM)
+	}
+	state, err := VMState(ctx, srcVM)
+	if err != nil {
+		return fmt.Errorf("cannot determine state of %q: %w", srcVM, err)
+	}
+	if state != "poweroff" && state != "aborted" {
+		return fmt.Errorf("source VM %q must be powered off (current state: %s); run 'dexbox vm stop %s' first", srcVM, state, srcVM)
+	}
+
+	// Validate destination does not exist
+	if VMExists(ctx, dstVM) {
+		return fmt.Errorf("VM %q already exists", dstVM)
+	}
+
+	// Clone
+	fmt.Printf("Cloning VM %q → %q...\n", srcVM, dstVM)
+	if err := CloneVM(ctx, srcVM, dstVM); err != nil {
+		return fmt.Errorf("clone VM: %w", err)
+	}
+	fmt.Println("Clone complete.")
+
+	// Re-add shared folder (the clone inherits the source's mapping;
+	// remove and re-add to ensure the path matches the current host config)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+	sharedDir := filepath.Join(home, ".dexbox", "shared")
+	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		return fmt.Errorf("create shared dir: %w", err)
+	}
+	_, _ = RunVBoxManage(ctx, "sharedfolder", "remove", dstVM, "--name", "shared")
+	if err := AddSharedFolder(ctx, dstVM, "shared", sharedDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not add shared folder: %v\n", err)
+	}
+
+	// Done
+	fmt.Println("")
+	fmt.Printf("VM %q cloned from %q successfully!\n", dstVM, srcVM)
+	fmt.Printf("  Credentials: [same as %q]\n", srcVM)
+	fmt.Printf("  Shared dir:  %s\n", sharedDir)
+	fmt.Println("")
+	fmt.Println("Next steps:")
+	fmt.Println("  dexbox start     # Start the tool server")
+	fmt.Println("  dexbox status    # Check VM state")
+	return nil
+}
+
 func ensureVirtualBox() error {
 	if _, err := exec.LookPath("VBoxManage"); err == nil {
 		out, err := exec.Command("VBoxManage", "--version").Output()
