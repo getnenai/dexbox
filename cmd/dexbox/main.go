@@ -547,12 +547,12 @@ func cmdCreateVM() *cobra.Command {
 an existing VM.
 
 When --iso is provided, a full Windows installation runs (15-30 minutes).
-When --from is provided, an existing VM is cloned (seconds).
-Exactly one of --iso or --from must be specified.
+When --from-desktop is provided, an existing VM is cloned (seconds).
+Exactly one of --iso or --from-desktop must be specified.
 
 Examples:
   dexbox create vm desktop-1 --iso ~/Downloads/Win11_25H2_English_x64.iso
-  dexbox create vm desktop-2 --from desktop-1`,
+  dexbox create vm desktop-2 --from-desktop desktop-1`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
@@ -562,7 +562,7 @@ Examples:
 			}
 
 			if isoPath == "" {
-				return fmt.Errorf("must specify --iso <path> or --from <source-vm>")
+				return fmt.Errorf("must specify --iso <path> or --from-desktop <source-vm>")
 			}
 			expandedISO := isoPath
 			if len(isoPath) > 1 && isoPath[0] == '~' {
@@ -573,8 +573,8 @@ Examples:
 		},
 	}
 	c.Flags().StringVar(&isoPath, "iso", "", "Path to Windows ISO (for fresh install)")
-	c.Flags().StringVar(&fromVM, "from", "", "Source VM to clone (for instant creation)")
-	c.MarkFlagsMutuallyExclusive("iso", "from")
+	c.Flags().StringVar(&fromVM, "from-desktop", "", "Source VM to clone (for instant creation)")
+	c.MarkFlagsMutuallyExclusive("iso", "from-desktop")
 	return c
 }
 
