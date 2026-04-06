@@ -1,0 +1,23 @@
+{
+  "name": "@nen/dexbox",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Create, control, and manage multiple Windows VMs and RDP desktops from your agent. Take screenshots, click, type, scroll, run PowerShell commands, and manage desktop lifecycle -- all through 12 tools powered by dexbox. Requires the dexbox binary (see https://github.com/getnenai/dexbox#quick-start for install instructions) and a running dexbox server.",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.4.2",
+      "minGatewayVersion": "2026.4.2"
+    },
+    "build": {
+      "openclawVersion": "2026.4.2",
+      "pluginSdkVersion": "2026.4.2"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^5.7.0"
+  }
+}

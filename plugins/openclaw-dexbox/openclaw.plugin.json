@@ -1,0 +1,22 @@
+{
+  "id": "@nen/dexbox",
+  "name": "Dexbox Desktop Control",
+  "version": "1.0.0",
+  "description": "Create, control, and manage multiple Windows VMs and RDP desktops from your agent. Take screenshots, click, type, scroll, run PowerShell commands, and manage desktop lifecycle -- all through 12 tools powered by dexbox.",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "default": "http://localhost:8600",
+        "description": "Dexbox server URL"
+      }
+    },
+    "additionalProperties": false
+  },
+  "uiHints": {
+    "labels": { "baseUrl": "Dexbox Server URL" },
+    "placeholders": { "baseUrl": "http://localhost:8600" }
+  }
+}
