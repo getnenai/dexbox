@@ -133,7 +133,7 @@ function registerDexboxTools(api: PluginApi) {
   });
 
   api.registerTool({
-    name: "get_desktop",
+    name: "status_desktop",
     description: "Get the current status of a single desktop.",
     parameters: {
       type: "object",

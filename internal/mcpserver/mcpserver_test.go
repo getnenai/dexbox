@@ -224,7 +224,7 @@ func TestGetDesktop(t *testing.T) {
 	defer api.Close()
 
 	srv := New(api.URL)
-	text := callTool(t, srv, "get_desktop", map[string]any{"name": "win11"})
+	text := callTool(t, srv, "status_desktop", map[string]any{"name": "win11"})
 
 	var resp map[string]any
 	if err := json.Unmarshal([]byte(text), &resp); err != nil {
@@ -259,11 +259,11 @@ func TestHTTPErrorPropagation(t *testing.T) {
 	}
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "get_desktop",
+		Name:      "status_desktop",
 		Arguments: map[string]any{"name": "nonexistent"},
 	})
 	if err != nil {
-		t.Fatalf("call get_desktop: %v", err)
+		t.Fatalf("call status_desktop: %v", err)
 	}
 	if !result.IsError {
 		t.Error("expected IsError to be true for a 404 response")

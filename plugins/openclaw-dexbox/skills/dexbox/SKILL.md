@@ -10,11 +10,11 @@ metadata:
         "install":
           [
             {
-              "id": "dexbox-go",
-              "kind": "go",
-              "package": "github.com/getnenai/dexbox/cmd/dexbox@latest",
+              "id": "dexbox-curl",
+              "kind": "shell",
+              "command": "curl -sSfL https://raw.githubusercontent.com/getnenai/dexbox/main/install.sh | sh",
               "bins": ["dexbox"],
-              "label": "Install dexbox via go install"
+              "label": "Install dexbox via curl"
             }
           ]
       }
@@ -37,10 +37,10 @@ dexbox up desktop-1   # Connect a desktop
 If dexbox is not installed, install it with:
 
 ```bash
-go install github.com/getnenai/dexbox/cmd/dexbox@latest
+curl -sSfL https://raw.githubusercontent.com/getnenai/dexbox/main/install.sh | sh
 ```
 
-Or clone the repo and run `make install`.
+Or see the [README](https://github.com/getnenai/dexbox#quick-start) for other install methods.
 
 ## Workflow
 
@@ -68,7 +68,7 @@ All action tools accept an optional `desktop` parameter:
 | `destroy_desktop` | Delete a VM or unregister an RDP connection |
 | `start_desktop` | Boot a VM or connect an RDP session |
 | `stop_desktop` | Shut down the VM guest OS or disconnect RDP |
-| `get_desktop` | Get status of a single desktop |
+| `status_desktop` | Get status of a single desktop |
 
 ### Action tools
 

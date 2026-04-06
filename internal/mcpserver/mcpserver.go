@@ -264,9 +264,9 @@ func New(baseURL string) *mcp.Server {
 		return textResult(body), empty{}, nil
 	})
 
-	// get_desktop
+	// status_desktop
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "get_desktop",
+		Name:        "status_desktop",
 		Description: "Get the current status of a single desktop.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input desktopNameInput) (*mcp.CallToolResult, empty, error) {
 		body, err := doRequest(ctx, baseURL, http.MethodGet, "/desktops/"+url.PathEscape(input.Name), nil)
