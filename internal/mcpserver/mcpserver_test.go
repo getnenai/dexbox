@@ -31,7 +31,11 @@ func mockDexboxAPI(t *testing.T) *httptest.Server {
 		// POST /actions (action tools)
 		case r.Method == http.MethodPost && r.URL.Path == "/actions":
 			var body map[string]any
-			json.NewDecoder(r.Body).Decode(&body)
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("/actions: decode body: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			toolType, _ := body["type"].(string)
 			action, _ := body["action"].(string)
 			desktop := r.URL.Query().Get("desktop")
@@ -46,8 +50,12 @@ func mockDexboxAPI(t *testing.T) *httptest.Server {
 				json.NewEncoder(w).Encode(map[string]any{"base64_image": "AAAA"})
 			case toolType == "bash_20250124":
 				json.NewEncoder(w).Encode(map[string]any{"output": "command output here", "desktop": desktop})
+			case toolType == "computer_20250124":
+				json.NewEncoder(w).Encode(map[string]any{"status": "ok", "action": action, "desktop": desktop})
 			default:
-				json.NewEncoder(w).Encode(map[string]any{"status": "ok", "desktop": desktop})
+				t.Errorf("/actions: unexpected type=%q action=%q", toolType, action)
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]any{"error": "unexpected request"})
 			}
 
 		// POST /desktops (create)
@@ -329,8 +337,8 @@ func TestScreenshot(t *testing.T) {
 	if img.MIMEType != "image/png" {
 		t.Errorf("expected image/png, got %s", img.MIMEType)
 	}
-	if len(img.Data) == 0 {
-		t.Error("expected non-empty image data")
+	if string(img.Data) != "FAKEPNG" {
+		t.Errorf("expected image data %q, got %q", "FAKEPNG", string(img.Data))
 	}
 }
 
@@ -349,7 +357,18 @@ func TestClick(t *testing.T) {
 }
 
 func TestClickRightButton(t *testing.T) {
-	api := mockDexboxAPI(t)
+	var gotAction string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/actions" {
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			gotAction, _ = body["action"].(string)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
 	defer api.Close()
 
 	srv := New(api.URL)
@@ -359,6 +378,9 @@ func TestClickRightButton(t *testing.T) {
 
 	if !strings.Contains(text, "clicked") {
 		t.Errorf("expected 'clicked' in result, got: %s", text)
+	}
+	if gotAction != "right_click" {
+		t.Errorf("expected action %q sent to server, got %q", "right_click", gotAction)
 	}
 }
 
@@ -419,7 +441,16 @@ func TestBash(t *testing.T) {
 }
 
 func TestScreenshotWithDesktop(t *testing.T) {
-	api := mockDexboxAPI(t)
+	var gotDesktop string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/actions" {
+			gotDesktop = r.URL.Query().Get("desktop")
+			w.Header().Set("Content-Type", "image/png")
+			w.Write([]byte("FAKEPNG"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
 	defer api.Close()
 
 	srv := New(api.URL)
@@ -427,30 +458,63 @@ func TestScreenshotWithDesktop(t *testing.T) {
 		"desktop": "win11",
 	})
 
-	_, ok := result.Content[0].(*mcp.ImageContent)
+	img, ok := result.Content[0].(*mcp.ImageContent)
 	if !ok {
 		t.Fatalf("expected ImageContent, got %T", result.Content[0])
+	}
+	if string(img.Data) != "FAKEPNG" {
+		t.Errorf("expected image data %q, got %q", "FAKEPNG", string(img.Data))
+	}
+	if gotDesktop != "win11" {
+		t.Errorf("expected desktop param %q, got %q", "win11", gotDesktop)
 	}
 }
 
 func TestClickWithDesktop(t *testing.T) {
-	api := mockDexboxAPI(t)
+	var gotDesktop, gotAction string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/actions" {
+			gotDesktop = r.URL.Query().Get("desktop")
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			gotAction, _ = body["action"].(string)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
 	defer api.Close()
 
 	srv := New(api.URL)
-	// The mock returns {"status":"ok","desktop":"my-rdp"} for non-screenshot
-	// computer actions, but the click tool returns its own "clicked (x, y)" text.
-	// This test verifies the request reaches the mock (no error) with desktop set.
 	text := callTool(t, srv, "click", map[string]any{
 		"desktop": "my-rdp", "x": 50, "y": 60,
 	})
 	if !strings.Contains(text, "clicked") {
 		t.Errorf("expected 'clicked' in result, got: %s", text)
 	}
+	if gotDesktop != "my-rdp" {
+		t.Errorf("expected desktop param %q, got %q", "my-rdp", gotDesktop)
+	}
+	if gotAction != "left_click" {
+		t.Errorf("expected action %q, got %q", "left_click", gotAction)
+	}
 }
 
 func TestBashWithDesktop(t *testing.T) {
-	api := mockDexboxAPI(t)
+	var gotDesktop, gotCommand string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/actions" {
+			gotDesktop = r.URL.Query().Get("desktop")
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			gotCommand, _ = body["command"].(string)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"output": "command output here"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
 	defer api.Close()
 
 	srv := New(api.URL)
@@ -460,5 +524,11 @@ func TestBashWithDesktop(t *testing.T) {
 	})
 	if !strings.Contains(text, "command output here") {
 		t.Errorf("expected bash output, got: %s", text)
+	}
+	if gotDesktop != "win11" {
+		t.Errorf("expected desktop param %q, got %q", "win11", gotDesktop)
+	}
+	if gotCommand != "whoami" {
+		t.Errorf("expected command %q, got %q", "whoami", gotCommand)
 	}
 }
