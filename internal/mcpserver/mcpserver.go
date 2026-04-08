@@ -78,6 +78,39 @@ type bashInput struct {
 	Command string `json:"command" jsonschema:"PowerShell command to execute in the guest VM"`
 }
 
+// --- Text editor tool input structs ------------------------------------
+
+type viewFileInput struct {
+	Desktop   string `json:"desktop,omitempty" jsonschema:"Desktop name. Omit if only one desktop is connected."`
+	Path      string `json:"path" jsonschema:"File path on the VM to view"`
+	ViewRange []int  `json:"view_range,omitempty" jsonschema:"Optional [start_line, end_line] range (1-based)"`
+}
+
+type createFileInput struct {
+	Desktop  string `json:"desktop,omitempty" jsonschema:"Desktop name. Omit if only one desktop is connected."`
+	Path     string `json:"path" jsonschema:"File path on the VM to create"`
+	FileText string `json:"file_text" jsonschema:"Content to write to the file"`
+}
+
+type strReplaceInput struct {
+	Desktop string `json:"desktop,omitempty" jsonschema:"Desktop name. Omit if only one desktop is connected."`
+	Path    string `json:"path" jsonschema:"File path on the VM"`
+	OldStr  string `json:"old_str" jsonschema:"Text to find (must appear exactly once)"`
+	NewStr  string `json:"new_str" jsonschema:"Replacement text"`
+}
+
+type insertTextInput struct {
+	Desktop    string `json:"desktop,omitempty" jsonschema:"Desktop name. Omit if only one desktop is connected."`
+	Path       string `json:"path" jsonschema:"File path on the VM"`
+	InsertLine int    `json:"insert_line" jsonschema:"Line number to insert text before (0 = beginning)"`
+	NewStr     string `json:"new_str" jsonschema:"Text to insert"`
+}
+
+type undoEditInput struct {
+	Desktop string `json:"desktop,omitempty" jsonschema:"Desktop name. Omit if only one desktop is connected."`
+	Path    string `json:"path" jsonschema:"File path on the VM to undo the last edit for"`
+}
+
 // --- Helpers -----------------------------------------------------------
 
 func textResult(text string) *mcp.CallToolResult {
@@ -399,5 +432,91 @@ func New(baseURL string) *mcp.Server {
 		return textResult(resp.Output), empty{}, nil
 	})
 
+	// --- Text editor tools ------------------------------------------------
+
+	// view_file
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "view_file",
+		Description: "View the contents of a file on the desktop VM with line numbers.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input viewFileInput) (*mcp.CallToolResult, empty, error) {
+		body := map[string]any{
+			"type":    "text_editor_20250124",
+			"command": "view",
+			"path":    input.Path,
+		}
+		if len(input.ViewRange) == 2 {
+			body["view_range"] = input.ViewRange
+		}
+		return doEditorAction(ctx, baseURL, input.Desktop, body)
+	})
+
+	// create_file
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "create_file",
+		Description: "Create a new file on the desktop VM with the given content.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input createFileInput) (*mcp.CallToolResult, empty, error) {
+		return doEditorAction(ctx, baseURL, input.Desktop, map[string]any{
+			"type":      "text_editor_20250124",
+			"command":   "create",
+			"path":      input.Path,
+			"file_text": input.FileText,
+		})
+	})
+
+	// str_replace
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "str_replace",
+		Description: "Find and replace a unique string in a file on the desktop VM.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input strReplaceInput) (*mcp.CallToolResult, empty, error) {
+		return doEditorAction(ctx, baseURL, input.Desktop, map[string]any{
+			"type":    "text_editor_20250124",
+			"command": "str_replace",
+			"path":    input.Path,
+			"old_str": input.OldStr,
+			"new_str": input.NewStr,
+		})
+	})
+
+	// insert_text
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "insert_text",
+		Description: "Insert text at a specific line number in a file on the desktop VM.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input insertTextInput) (*mcp.CallToolResult, empty, error) {
+		return doEditorAction(ctx, baseURL, input.Desktop, map[string]any{
+			"type":        "text_editor_20250124",
+			"command":     "insert",
+			"path":        input.Path,
+			"insert_line": input.InsertLine,
+			"new_str":     input.NewStr,
+		})
+	})
+
+	// undo_edit
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "undo_edit",
+		Description: "Undo the last edit made to a file on the desktop VM.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input undoEditInput) (*mcp.CallToolResult, empty, error) {
+		return doEditorAction(ctx, baseURL, input.Desktop, map[string]any{
+			"type":    "text_editor_20250124",
+			"command": "undo_edit",
+			"path":    input.Path,
+		})
+	})
+
 	return server
+}
+
+// doEditorAction sends a text_editor action and extracts the output text.
+func doEditorAction(ctx context.Context, baseURL, desktop string, body map[string]any) (*mcp.CallToolResult, empty, error) {
+	respBytes, err := doActionRaw(ctx, baseURL, desktop, body, "")
+	if err != nil {
+		return errorResult(err.Error()), empty{}, nil
+	}
+	var resp struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(respBytes, &resp); err != nil {
+		return textResult(string(respBytes)), empty{}, nil
+	}
+	return textResult(resp.Output), empty{}, nil
 }

@@ -35,7 +35,7 @@ type Server struct {
 	computers    map[string]*tools.ComputerTool
 	computerDskt map[string]desktop.Desktop // desktop used to create each cached ComputerTool
 	bashes       map[string]*tools.BashTool
-
+	editors      map[string]*tools.EditorTool
 }
 
 // Options configures the tool server.
@@ -74,7 +74,7 @@ func New(opts Options) *Server {
 		computers:    make(map[string]*tools.ComputerTool),
 		computerDskt: make(map[string]desktop.Desktop),
 		bashes:       make(map[string]*tools.BashTool),
-
+		editors:      make(map[string]*tools.EditorTool),
 	}
 }
 
@@ -403,7 +403,14 @@ func (s *Server) executeAction(r *http.Request, vmName string, action *tools.Can
 			return &tools.CanonicalResult{Output: fmt.Sprintf("error: %v", err)}, nil
 		}
 		return &tools.CanonicalResult{Output: out}, nil
-
+	case "text_editor":
+		et := s.getEditorTool(vmName)
+		result, err := et.Execute(r.Context(), action)
+		if err != nil {
+			log.Printf("[text_editor] command failed: %v", err)
+			return &tools.CanonicalResult{Output: fmt.Sprintf("error: %v", err)}, nil
+		}
+		return result, nil
 	default:
 		return nil, fmt.Errorf("%w %q", errUnknownTool, action.Tool)
 	}
@@ -534,7 +541,24 @@ func (s *Server) getBashTool(vmName string) *tools.BashTool {
 	return bt
 }
 
-
+func (s *Server) getEditorTool(vmName string) *tools.EditorTool {
+	s.toolsMu.RLock()
+	et, ok := s.editors[vmName]
+	s.toolsMu.RUnlock()
+	if ok {
+		return et
+	}
+	bt := s.getBashTool(vmName)
+	et = tools.NewEditorTool(bt)
+	s.toolsMu.Lock()
+	if existing, ok := s.editors[vmName]; ok {
+		s.toolsMu.Unlock()
+		return existing
+	}
+	s.editors[vmName] = et
+	s.toolsMu.Unlock()
+	return et
+}
 
 // --- Unified desktop routes ---
 
@@ -899,12 +923,13 @@ func (s *Server) requireVBox(w http.ResponseWriter) bool {
 	return true
 }
 
-// clearToolCache removes cached ComputerTool and BashTool instances for a desktop.
+// clearToolCache removes cached tool instances for a desktop.
 func (s *Server) clearToolCache(name string) {
 	s.toolsMu.Lock()
 	delete(s.computers, name)
 	delete(s.computerDskt, name)
 	delete(s.bashes, name)
+	delete(s.editors, name)
 	s.toolsMu.Unlock()
 }
 

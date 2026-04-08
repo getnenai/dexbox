@@ -322,6 +322,169 @@ function registerDexboxTools(api: PluginApi) {
       }
     },
   });
+
+  // --- Text editor tools ---
+
+  async function doEditorAction(
+    baseUrl: string | undefined,
+    desktop: string | undefined,
+    body: Record<string, unknown>,
+  ) {
+    const resp = await doAction(baseUrl, desktop, body);
+    try {
+      const parsed = JSON.parse(resp);
+      return text(parsed.output || resp);
+    } catch {
+      return text(resp);
+    }
+  }
+
+  api.registerTool({
+    name: "view_file",
+    description:
+      "View the contents of a file on the desktop VM with line numbers.",
+    parameters: {
+      type: "object",
+      properties: {
+        desktop: {
+          type: "string",
+          description: "Desktop name. Omit if only one desktop is connected.",
+        },
+        path: { type: "string", description: "File path on the VM to view" },
+        view_range: {
+          type: "array",
+          items: { type: "integer" },
+          description: "Optional [start_line, end_line] range (1-based)",
+        },
+      },
+      required: ["path"],
+    },
+    async execute(_id, params) {
+      const body: Record<string, unknown> = {
+        type: "text_editor_20250124",
+        command: "view",
+        path: params.path,
+      };
+      if (params.view_range) body.view_range = params.view_range;
+      return doEditorAction(baseUrl, params.desktop, body);
+    },
+  });
+
+  api.registerTool({
+    name: "create_file",
+    description: "Create a new file on the desktop VM with the given content.",
+    parameters: {
+      type: "object",
+      properties: {
+        desktop: {
+          type: "string",
+          description: "Desktop name. Omit if only one desktop is connected.",
+        },
+        path: { type: "string", description: "File path on the VM to create" },
+        file_text: {
+          type: "string",
+          description: "Content to write to the file",
+        },
+      },
+      required: ["path", "file_text"],
+    },
+    async execute(_id, params) {
+      return doEditorAction(baseUrl, params.desktop, {
+        type: "text_editor_20250124",
+        command: "create",
+        path: params.path,
+        file_text: params.file_text,
+      });
+    },
+  });
+
+  api.registerTool({
+    name: "str_replace",
+    description:
+      "Find and replace a unique string in a file on the desktop VM.",
+    parameters: {
+      type: "object",
+      properties: {
+        desktop: {
+          type: "string",
+          description: "Desktop name. Omit if only one desktop is connected.",
+        },
+        path: { type: "string", description: "File path on the VM" },
+        old_str: {
+          type: "string",
+          description: "Text to find (must appear exactly once)",
+        },
+        new_str: { type: "string", description: "Replacement text" },
+      },
+      required: ["path", "old_str", "new_str"],
+    },
+    async execute(_id, params) {
+      return doEditorAction(baseUrl, params.desktop, {
+        type: "text_editor_20250124",
+        command: "str_replace",
+        path: params.path,
+        old_str: params.old_str,
+        new_str: params.new_str,
+      });
+    },
+  });
+
+  api.registerTool({
+    name: "insert_text",
+    description:
+      "Insert text at a specific line number in a file on the desktop VM.",
+    parameters: {
+      type: "object",
+      properties: {
+        desktop: {
+          type: "string",
+          description: "Desktop name. Omit if only one desktop is connected.",
+        },
+        path: { type: "string", description: "File path on the VM" },
+        insert_line: {
+          type: "integer",
+          description: "Line number to insert text before (0 = beginning)",
+        },
+        new_str: { type: "string", description: "Text to insert" },
+      },
+      required: ["path", "insert_line", "new_str"],
+    },
+    async execute(_id, params) {
+      return doEditorAction(baseUrl, params.desktop, {
+        type: "text_editor_20250124",
+        command: "insert",
+        path: params.path,
+        insert_line: params.insert_line,
+        new_str: params.new_str,
+      });
+    },
+  });
+
+  api.registerTool({
+    name: "undo_edit",
+    description: "Undo the last edit made to a file on the desktop VM.",
+    parameters: {
+      type: "object",
+      properties: {
+        desktop: {
+          type: "string",
+          description: "Desktop name. Omit if only one desktop is connected.",
+        },
+        path: {
+          type: "string",
+          description: "File path on the VM to undo the last edit for",
+        },
+      },
+      required: ["path"],
+    },
+    async execute(_id, params) {
+      return doEditorAction(baseUrl, params.desktop, {
+        type: "text_editor_20250124",
+        command: "undo_edit",
+        path: params.path,
+      });
+    },
+  });
 }
 
 // Plugin entry point — use the OpenClaw definePluginEntry pattern.

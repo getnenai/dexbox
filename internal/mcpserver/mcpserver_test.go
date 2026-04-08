@@ -50,6 +50,14 @@ func mockDexboxAPI(t *testing.T) *httptest.Server {
 				json.NewEncoder(w).Encode(map[string]any{"base64_image": "AAAA"})
 			case toolType == "bash_20250124":
 				json.NewEncoder(w).Encode(map[string]any{"output": "command output here", "desktop": desktop})
+			case toolType == "text_editor_20250124":
+				command, _ := body["command"].(string)
+				path, _ := body["path"].(string)
+				json.NewEncoder(w).Encode(map[string]any{
+					"type":    "text_editor_20250124",
+					"output":  fmt.Sprintf("editor %s on %s", command, path),
+					"desktop": desktop,
+				})
 			case toolType == "computer_20250124":
 				json.NewEncoder(w).Encode(map[string]any{"status": "ok", "action": action, "desktop": desktop})
 			default:
@@ -530,5 +538,75 @@ func TestBashWithDesktop(t *testing.T) {
 	}
 	if gotCommand != "whoami" {
 		t.Errorf("expected command %q, got %q", "whoami", gotCommand)
+	}
+}
+
+func TestViewFile(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	text := callTool(t, srv, "view_file", map[string]any{
+		"path": `C:\Users\dexbox\file.txt`,
+	})
+	if !strings.Contains(text, "editor view") {
+		t.Errorf("expected editor output, got: %s", text)
+	}
+}
+
+func TestCreateFile(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	text := callTool(t, srv, "create_file", map[string]any{
+		"path":      `C:\Users\dexbox\new.txt`,
+		"file_text": "hello world",
+	})
+	if !strings.Contains(text, "editor create") {
+		t.Errorf("expected editor output, got: %s", text)
+	}
+}
+
+func TestStrReplace(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	text := callTool(t, srv, "str_replace", map[string]any{
+		"path":    `C:\Users\dexbox\file.txt`,
+		"old_str": "hello",
+		"new_str": "world",
+	})
+	if !strings.Contains(text, "editor str_replace") {
+		t.Errorf("expected editor output, got: %s", text)
+	}
+}
+
+func TestInsertText(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	text := callTool(t, srv, "insert_text", map[string]any{
+		"path":        `C:\Users\dexbox\file.txt`,
+		"insert_line": 5,
+		"new_str":     "inserted line",
+	})
+	if !strings.Contains(text, "editor insert") {
+		t.Errorf("expected editor output, got: %s", text)
+	}
+}
+
+func TestUndoEdit(t *testing.T) {
+	api := mockDexboxAPI(t)
+	defer api.Close()
+
+	srv := New(api.URL)
+	text := callTool(t, srv, "undo_edit", map[string]any{
+		"path": `C:\Users\dexbox\file.txt`,
+	})
+	if !strings.Contains(text, "editor undo_edit") {
+		t.Errorf("expected editor output, got: %s", text)
 	}
 }
