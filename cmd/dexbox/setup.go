@@ -76,7 +76,11 @@ func setupClaudeCode(desktop string) error {
 	}
 
 	// Read existing config
-	configPath := filepath.Join(os.Getenv("HOME"), ".claude", "claude_code_config.json")
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("could not determine home directory: %w", err)
+	}
+	configPath := filepath.Join(homeDir, ".claude", "claude_code_config.json")
 
 	var cfg map[string]any
 	if data, err := os.ReadFile(configPath); err == nil {
