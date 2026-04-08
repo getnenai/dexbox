@@ -246,6 +246,9 @@ func TestHTTPErrorPropagation(t *testing.T) {
 	if !result.IsError {
 		t.Error("expected IsError to be true for a 404 response")
 	}
+	if len(result.Content) == 0 {
+		t.Fatal("expected error content, got empty")
+	}
 	tc, ok := result.Content[0].(*mcp.TextContent)
 	if !ok {
 		t.Fatalf("expected TextContent, got %T", result.Content[0])
