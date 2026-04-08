@@ -79,12 +79,12 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	w.Write(body)
+	_, _ = w.Write(body)
 }
 
 func serveViewer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(viewerHTML)
+	_, _ = w.Write(viewerHTML)
 }
 
 func serveTunnel(w http.ResponseWriter, r *http.Request, name string, mgr *desktop.Manager, guacdAddr string) {

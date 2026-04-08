@@ -337,6 +337,23 @@ func TestManagerRDPConfig_NotFound(t *testing.T) {
 // a context with a deadline so that a deadlock manifests as a timeout
 // rather than hanging the test runner forever.
 func TestManagerUp_RDPDeadlock(t *testing.T) {
+	// Start a local TCP listener on the guacd port so EnsureRunning
+	// short-circuits without pulling a Docker image (which is slow in CI).
+	l, listenErr := net.Listen("tcp", "localhost:4822")
+	if listenErr != nil {
+		t.Skipf("cannot bind localhost:4822 (port in use?): %v", listenErr)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
 	store := NewConnectionStore(filepath.Join(t.TempDir(), "conn.json"))
 	store.Add("test-rdp", RDPConfig{
 		Host:     "127.0.0.1",

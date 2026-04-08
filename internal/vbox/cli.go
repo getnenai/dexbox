@@ -135,16 +135,6 @@ func GuestAdditionsReady(ctx context.Context, vmName string) bool {
 	return err == nil && n >= 2
 }
 
-// guestOSReady returns true if Guest Additions report a guest OS product name
-// via guestproperty. This can succeed even when GuestAdditionsRunLevel < 2.
-func guestOSReady(ctx context.Context, vmName string) bool {
-	out, err := RunVBoxManage(ctx, "guestproperty", "get", vmName, "/VirtualBox/GuestInfo/OS/Product")
-	if err != nil {
-		return false
-	}
-	// Output is "Value: <name>" when set, or "No value set!" when unavailable.
-	return !strings.Contains(out, "No value set!") && strings.Contains(out, "Value:")
-}
 
 // GuestRun executes a program inside the guest OS via Guest Additions.
 func GuestRun(ctx context.Context, vmName, user, pass, exe string, args ...string) (string, error) {

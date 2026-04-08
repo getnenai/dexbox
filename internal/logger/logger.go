@@ -91,7 +91,8 @@ func RenderLogLine(raw string) string {
 
 	// Render parts
 	ts := styleTime.Render(tStr)
-	comp := styleCompBase.Copy().Foreground(compColor).Render("[" + shortName + "]")
+	compStyle := styleCompBase.Foreground(compColor)
+	comp := compStyle.Render("[" + shortName + "]")
 
 	// Message and badge logic
 	msgPart := msg

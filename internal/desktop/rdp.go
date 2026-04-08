@@ -703,7 +703,7 @@ func typeText(c Client, text string, delay time.Duration, st *syncTracker) error
 	// Clear any stale modifier state once before we start typing.
 	releaseModifiers(c)
 
-	for _, r := range []rune(text) {
+	for _, r := range text {
 
 		var code bring.KeyCode
 

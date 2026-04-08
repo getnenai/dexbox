@@ -291,11 +291,11 @@ func (c *SOAPClient) KeyboardPutScancodes(hexCodes []string) error {
 	}
 	return c.withReconnect(func() error {
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf(`<IKeyboard_putScancodes xmlns="http://www.virtualbox.org/"><_this>%s</_this>`, c.keyboardRef))
+		fmt.Fprintf(&sb, `<IKeyboard_putScancodes xmlns="http://www.virtualbox.org/"><_this>%s</_this>`, c.keyboardRef)
 		for _, h := range hexCodes {
 			var v int64
-			fmt.Sscanf(h, "%x", &v)
-			sb.WriteString(fmt.Sprintf("<scancodes>%d</scancodes>", v))
+			_, _ = fmt.Sscanf(h, "%x", &v)
+			fmt.Fprintf(&sb, "<scancodes>%d</scancodes>", v)
 		}
 		sb.WriteString("</IKeyboard_putScancodes>")
 		_, err := c.call("IKeyboard_putScancodes", sb.String())
