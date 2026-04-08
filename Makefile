@@ -1,4 +1,4 @@
-.PHONY: all test build-cli install install-cli go-install lint clean help
+.PHONY: all test build-cli install install-cli go-install lint lint-all clean help
 .PHONY: agent-py-lc-install agent-py-lc-run agent-py-lc-lint agent-ts-vercel-install agent-ts-vercel-run
 .PHONY: extend-parse-ts extend-parse-py dexbox-run
 
@@ -26,8 +26,10 @@ go-install: ## Install CLI using 'go install' (standard Go way)
 	go install ./cmd/dexbox
 	@echo "Installed dexbox via 'go install'. Ensure your GOPATH bin is in your PATH."
 
-lint: ## Run go vet on Go sources
-	go vet ./...
+lint: ## Run golangci-lint on Go sources
+	golangci-lint run ./...
+
+lint-all: lint agent-py-lc-lint ## Run all linters (Go + Python)
 
 clean: ## Remove build artifacts
 	rm -rf bin/ dist/ build/
