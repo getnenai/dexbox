@@ -7,3 +7,9 @@ linters:
     - ineffassign
     - staticcheck
     - unused
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      - path: "_test\\.go"
+        linters: [errcheck]

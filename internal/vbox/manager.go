@@ -116,7 +116,7 @@ func (m *Manager) Stop(ctx context.Context, vmName string) error {
 	// pattern which is proven to work via guestcontrol). GuestRun will
 	// return an error because the shutdown kills the guestcontrol
 	// session — we ignore it and poll for poweroff state instead.
-	GuestRun(ctx, vmName, m.soapUser, m.soapPass,
+	_, _ = GuestRun(ctx, vmName, m.soapUser, m.soapPass,
 		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
 		"-NoProfile", "-NonInteractive", "-Command", "Stop-Computer -Force")
 

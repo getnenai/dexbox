@@ -222,7 +222,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	if result.Image != nil && r.Header.Get("Accept") == "image/png" {
 		w.Header().Set("Content-Type", "image/png")
 		w.WriteHeader(http.StatusOK)
-		w.Write(result.Image)
+		_, _ = w.Write(result.Image)
 		return
 	}
 
@@ -237,7 +237,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(formatted)
+	_, _ = w.Write(formatted)
 }
 
 func (s *Server) handleBatchAction(w http.ResponseWriter, r *http.Request) {
@@ -911,9 +911,6 @@ func (s *Server) clearToolCache(name string) {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
-func randomSuffix() string {
-	return fmt.Sprintf("%x", time.Now().UnixNano()&0xffffff)
-}
