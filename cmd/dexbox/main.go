@@ -81,7 +81,7 @@ Environment variables (or .env file):
 		cmdStart(), cmdStop(), cmdStatus(),
 		cmdUp(), cmdDown(), cmdList(), cmdView(),
 		cmdCreate(), cmdVM(), cmdRDP(), cmdRunAction(),
-		cmdMCP(),
+		cmdMCP(), cmdSetup(),
 	)
 
 	if err := root.Execute(); err != nil {
