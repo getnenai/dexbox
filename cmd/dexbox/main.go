@@ -1124,13 +1124,17 @@ func cmdMCP() *cobra.Command {
 		Short: "Run the MCP server (stdio transport)",
 		Long: `Run a Model Context Protocol (MCP) server over stdin/stdout.
 
-This exposes Dexbox desktop lifecycle tools (list, create, destroy, start,
-stop, get) so that IDE AI assistants (Cursor, Claude Code, etc.) can manage
-desktops directly.
+This exposes Dexbox desktop tools (screenshot, click, type, bash, etc.)
+so that IDE AI assistants (Cursor, Claude Code, etc.) can manage desktops.
 
 Requires the dexbox server to be running (dexbox start).
 
-IDE configuration example (Cursor / Claude Code):
+Quick setup:
+
+  claude mcp add dexbox -- $(dexbox mcp config)
+  codex mcp add dexbox -- $(dexbox mcp config)
+
+Manual config:
 
   {
     "mcpServers": {
@@ -1155,5 +1159,41 @@ IDE configuration example (Cursor / Claude Code):
 	}
 
 	c.Flags().StringVar(&baseURL, "base-url", "", "Dexbox server base URL (default: derived from DEXBOX_LISTEN)")
+
+	// Subcommand: dexbox mcp config <client>
+	c.AddCommand(cmdMCPConfig())
+
 	return c
+}
+
+// cmdMCPConfig prints the dexbox binary path and "mcp" argument for use with
+// coding agent MCP setup commands.
+func cmdMCPConfig() *cobra.Command {
+	return &cobra.Command{
+		Use:   "config",
+		Short: "Print the dexbox binary path and arguments for MCP client setup",
+		Long: `Print the resolved dexbox binary path and "mcp" argument for use with MCP client setup commands.
+
+Examples:
+  claude mcp add dexbox -- $(dexbox mcp config)
+  codex mcp add dexbox -- $(dexbox mcp config)
+  gemini mcp add dexbox -- $(dexbox mcp config)
+
+The output is the same for all clients — just the resolved binary path.
+Use this when an agent doesn't automatically discover the dexbox CLI help.`,
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			binPath, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("could not determine dexbox path: %w", err)
+			}
+			binPath, err = filepath.EvalSymlinks(binPath)
+			if err != nil {
+				return fmt.Errorf("could not resolve dexbox path: %w", err)
+			}
+			fmt.Printf("%s mcp", binPath)
+			return nil
+		},
+	}
 }
