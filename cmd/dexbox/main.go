@@ -1131,8 +1131,8 @@ Requires the dexbox server to be running (dexbox start).
 
 Quick setup:
 
-  claude mcp add dexbox -- $(dexbox mcp config claude)
-  codex mcp add dexbox -- $(dexbox mcp config codex)
+  claude mcp add dexbox -- $(dexbox mcp config)
+  codex mcp add dexbox -- $(dexbox mcp config)
 
 Manual config:
 
@@ -1166,22 +1166,22 @@ Manual config:
 	return c
 }
 
-// cmdMCPConfig prints the command + args needed for an MCP client to connect.
-// Usage:
-//
-//	claude mcp add dexbox -- $(dexbox mcp config claude)
-//	codex mcp add dexbox -- $(dexbox mcp config codex)
+// cmdMCPConfig prints the dexbox binary path and "mcp" argument for use with
+// coding agent MCP setup commands.
 func cmdMCPConfig() *cobra.Command {
 	return &cobra.Command{
-		Use:   "config [client]",
-		Short: "Print the command and args for an MCP client to connect to dexbox",
-		Long: `Print the dexbox binary path and arguments for use with MCP client setup commands.
+		Use:   "config",
+		Short: "Print the dexbox binary path and arguments for MCP client setup",
+		Long: `Print the resolved dexbox binary path and "mcp" argument for use with MCP client setup commands.
 
 Examples:
-  claude mcp add dexbox -- $(dexbox mcp config claude)
-  codex mcp add dexbox -- $(dexbox mcp config codex)
-  gemini mcp add dexbox -- $(dexbox mcp config gemini)`,
-		Args:         cobra.MaximumNArgs(1),
+  claude mcp add dexbox -- $(dexbox mcp config)
+  codex mcp add dexbox -- $(dexbox mcp config)
+  gemini mcp add dexbox -- $(dexbox mcp config)
+
+The output is the same for all clients — just the resolved binary path.
+Use this when an agent doesn't automatically discover the dexbox CLI help.`,
+		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			binPath, err := os.Executable()
