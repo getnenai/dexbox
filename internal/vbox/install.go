@@ -433,6 +433,8 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 		"REM === Security hardening ===\r\n"+
 		"%[4]s Disabling Defender >> %%LOG%%\r\n"+
 		"powershell -Command Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue\r\n"+
+		"%[4]s Adding Defender exclusions >> %%LOG%%\r\n"+
+		"powershell -Command \"Add-MpPreference -ExclusionPath '\\\\vboxsvr\\shared','C:\\dexbox','C:\\Users\\dexbox' -ErrorAction SilentlyContinue\"\r\n"+
 		"%[4]s Opening firewall port 8600 >> %%LOG%%\r\n"+
 		"netsh advfirewall firewall add rule name=dexbox-agent dir=in action=allow protocol=TCP localport=8600 >> %%LOG%% 2>&1\r\n"+
 		"%[4]s Setting execution policy >> %%LOG%%\r\n"+
