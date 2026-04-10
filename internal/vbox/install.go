@@ -16,7 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
-	"unicode/utf8"
+
 )
 
 //go:embed autounattend.xml
@@ -111,12 +111,15 @@ func Install(ctx context.Context, vmName, isoPath, user, pass string) error {
 		return fmt.Errorf("waiting for installation: %w", err)
 	}
 
+	// Clean up autounattend ISO so credentials are not left on disk.
+	_ = os.Remove(filepath.Join(home, isoCacheDir, "autounattend.iso"))
+
 	// Step 7: Done
 	fmt.Println("")
 	fmt.Println("Installation complete!")
 	fmt.Printf("  VM name:    %s\n", vmName)
 	fmt.Printf("  User:       %s\n", user)
-	fmt.Printf("  Password:   %s\n", strings.Repeat("*", utf8.RuneCountInString(pass)))
+	fmt.Println("  Password:   ***")
 	fmt.Printf("  Shared dir: %s\n", sharedDir)
 	fmt.Println("")
 	fmt.Println("Next steps:")
