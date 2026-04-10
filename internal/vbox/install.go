@@ -75,12 +75,22 @@ func Install(ctx context.Context, vmName, isoPath, user, pass string) error {
 		return fmt.Errorf("unattended install: %w", err)
 	}
 
-	// Step 5: Configure shared folder (must happen while VM is powered off
-	// so the mapping is permanent rather than transient)
+	// Clean up autounattend ISO so credentials are not left on disk.
+	// Deferred here so it runs on all exit paths (including StartVM or
+	// waitForInstallation failures).
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("get home dir: %w", err)
 	}
+	defer func() {
+		isoFile := filepath.Join(home, isoCacheDir, "autounattend.iso")
+		if err := os.Remove(isoFile); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Warning: could not remove autounattend ISO: %v\n", err)
+		}
+	}()
+
+	// Step 5: Configure shared folder (must happen while VM is powered off
+	// so the mapping is permanent rather than transient)
 	sharedDir := filepath.Join(home, ".dexbox", "shared")
 	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
 		return fmt.Errorf("create shared dir: %w", err)
@@ -110,9 +120,6 @@ func Install(ctx context.Context, vmName, isoPath, user, pass string) error {
 	if err := waitForInstallation(ctx, vmName); err != nil {
 		return fmt.Errorf("waiting for installation: %w", err)
 	}
-
-	// Clean up autounattend ISO so credentials are not left on disk.
-	_ = os.Remove(filepath.Join(home, isoCacheDir, "autounattend.iso"))
 
 	// Step 7: Done
 	fmt.Println("")
