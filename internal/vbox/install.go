@@ -71,23 +71,24 @@ func Install(ctx context.Context, vmName, isoPath, user, pass string) error {
 
 	// Step 4: Unattended install
 	fmt.Println("Configuring unattended Windows install...")
-	if err := unattendedInstall(ctx, vmName, isoPath, user, pass); err != nil {
+	autounattendISO, err := unattendedInstall(ctx, vmName, isoPath, user, pass)
+	if err != nil {
 		return fmt.Errorf("unattended install: %w", err)
 	}
 
 	// Clean up autounattend ISO so credentials are not left on disk.
 	// Deferred here so it runs on all exit paths (including StartVM or
 	// waitForInstallation failures).
+	defer func() {
+		if err := os.Remove(autounattendISO); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Warning: could not remove autounattend ISO: %v\n", err)
+		}
+	}()
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("get home dir: %w", err)
 	}
-	defer func() {
-		isoFile := filepath.Join(home, isoCacheDir, "autounattend.iso")
-		if err := os.Remove(isoFile); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "Warning: could not remove autounattend ISO: %v\n", err)
-		}
-	}()
 
 	// Step 5: Configure shared folder (must happen while VM is powered off
 	// so the mapping is permanent rather than transient)
@@ -340,7 +341,7 @@ func ensureVirtioISO(ctx context.Context) (string, error) {
 	return isoPath, nil
 }
 
-func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) error {
+func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) (string, error) {
 	// Build a small ISO containing autounattend.xml and attach it alongside the
 	// Windows ISO. Windows Setup scans all attached removable media for
 	// autounattend.xml, so this sidesteps the brittle "VBoxManage unattended
@@ -348,13 +349,13 @@ func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) 
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// Write autounattend.xml into a staging directory.
 	stageDir, err := os.MkdirTemp("", "dexbox-autounattend-")
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.RemoveAll(stageDir)
 
@@ -405,7 +406,7 @@ func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) 
 	xmlData = bytes.ReplaceAll(xmlData, []byte(`__VM_USER__`), []byte(xmlEscape(user)))
 	xmlData = bytes.ReplaceAll(xmlData, []byte(`__VM_PASS__`), []byte(xmlEscape(pass)))
 	if err := os.WriteFile(filepath.Join(stageDir, "autounattend.xml"), xmlData, 0o644); err != nil {
-		return err
+		return "", err
 	}
 
 	// Generate SetupComplete.cmd — Windows runs this as SYSTEM after setup
@@ -428,7 +429,7 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 		"shutdown /r /t 30\r\n",
 		certTool, gaExe, gaExe)
 	if err := os.WriteFile(filepath.Join(stageDir, "SetupComplete.cmd"), []byte(setupScript), 0o644); err != nil {
-		return err
+		return "", err
 	}
 
 	// On ARM, add a startup.nsh EFI shell script as a fallback. If the
@@ -441,31 +442,35 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 			startupNsh += fmt.Sprintf("if exist fs%d:\\EFI\\BOOT\\bootaa64.efi then\r\n  fs%d:\\EFI\\BOOT\\bootaa64.efi\r\nendif\r\n", i, i)
 		}
 		if err := os.WriteFile(filepath.Join(stageDir, "startup.nsh"), []byte(startupNsh), 0o644); err != nil {
-			return err
+			return "", err
 		}
 	}
 
-	// Create the ISO in the same cache directory as the Windows ISO so it
-	// persists for the duration of the installation.
+	// Create a per-install ISO in the cache directory. The vmName is
+	// included in the filename so parallel provisioning runs don't
+	// clobber each other's answer files.
 	isoDir := filepath.Join(home, isoCacheDir)
-	if err := os.MkdirAll(isoDir, 0o755); err != nil {
-		return fmt.Errorf("create iso cache dir: %w", err)
+	if err := os.MkdirAll(isoDir, 0o700); err != nil {
+		return "", fmt.Errorf("create iso cache dir: %w", err)
 	}
-	autounattendISO := filepath.Join(isoDir, "autounattend.iso")
+	autounattendISO := filepath.Join(isoDir, fmt.Sprintf("autounattend-%s-%d.iso", vmName, time.Now().UnixNano()))
 	if err := createISO(stageDir, autounattendISO); err != nil {
-		return fmt.Errorf("create autounattend ISO: %w", err)
+		return "", fmt.Errorf("create autounattend ISO: %w", err)
+	}
+	if err := os.Chmod(autounattendISO, 0o600); err != nil {
+		return "", fmt.Errorf("chmod autounattend ISO: %w", err)
 	}
 
 	// Attach the Windows installer ISO to SATA port 1.
 	if err := AttachISO(ctx, vmName, isoPath); err != nil {
-		return fmt.Errorf("attach Windows ISO: %w", err)
+		return "", fmt.Errorf("attach Windows ISO: %w", err)
 	}
 
 	// Attach the autounattend ISO to SATA port 2.
 	if _, err := RunVBoxManage(ctx, "storageattach", vmName,
 		"--storagectl", "SATA", "--port", "2", "--device", "0",
 		"--type", "dvddrive", "--medium", autounattendISO); err != nil {
-		return fmt.Errorf("attach autounattend ISO: %w", err)
+		return "", fmt.Errorf("attach autounattend ISO: %w", err)
 	}
 
 	// Attach Guest Additions ISO to SATA port 3 so SetupComplete.cmd
@@ -474,16 +479,16 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 	// created with older code may have fewer ports configured.
 	if _, err := RunVBoxManage(ctx, "storagectl", vmName,
 		"--name", "SATA", "--portcount", "5"); err != nil {
-		return fmt.Errorf("set SATA port count: %w", err)
+		return "", fmt.Errorf("set SATA port count: %w", err)
 	}
 	gaISO, err := GuestAdditionsISOPath()
 	if err != nil {
-		return fmt.Errorf("guest additions: %w", err)
+		return "", fmt.Errorf("guest additions: %w", err)
 	}
 	if _, err := RunVBoxManage(ctx, "storageattach", vmName,
 		"--storagectl", "SATA", "--port", "3", "--device", "0",
 		"--type", "dvddrive", "--medium", gaISO); err != nil {
-		return fmt.Errorf("attach Guest Additions ISO: %w", err)
+		return "", fmt.Errorf("attach Guest Additions ISO: %w", err)
 	}
 
 	// On ARM, attach the virtio-win ISO to SATA port 4 so Windows PE can
@@ -491,16 +496,16 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 	if nativeArch() == "arm64" {
 		virtioISO, err := ensureVirtioISO(ctx)
 		if err != nil {
-			return fmt.Errorf("virtio-win ISO: %w", err)
+			return "", fmt.Errorf("virtio-win ISO: %w", err)
 		}
 		if _, err := RunVBoxManage(ctx, "storageattach", vmName,
 			"--storagectl", "SATA", "--port", "4", "--device", "0",
 			"--type", "dvddrive", "--medium", virtioISO); err != nil {
-			return fmt.Errorf("attach virtio-win ISO: %w", err)
+			return "", fmt.Errorf("attach virtio-win ISO: %w", err)
 		}
 	}
 
-	return nil
+	return autounattendISO, nil
 }
 
 // createISO wraps platform-native tools to produce an ISO 9660 image from srcDir.
