@@ -654,6 +654,7 @@ Examples:
 	c.Flags().StringVar(&fromVM, "from-desktop", "", "Source VM to clone (for instant creation)")
 	c.Flags().StringVar(&user, "user", "dexbox", "Guest OS username")
 	c.MarkFlagsMutuallyExclusive("iso", "from-desktop")
+	c.MarkFlagsMutuallyExclusive("from-desktop", "user")
 	return c
 }
 

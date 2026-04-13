@@ -453,7 +453,7 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 	if err := os.MkdirAll(isoDir, 0o700); err != nil {
 		return "", fmt.Errorf("create iso cache dir: %w", err)
 	}
-	autounattendISO := filepath.Join(isoDir, fmt.Sprintf("autounattend-%s-%d.iso", vmName, time.Now().UnixNano()))
+	autounattendISO := filepath.Join(isoDir, fmt.Sprintf("autounattend-%s-%d.iso", filepath.Base(vmName), time.Now().UnixNano()))
 	if err := createISO(stageDir, autounattendISO); err != nil {
 		return "", fmt.Errorf("create autounattend ISO: %w", err)
 	}
