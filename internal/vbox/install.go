@@ -375,12 +375,9 @@ func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) 
 	defer os.RemoveAll(stageDir)
 
 	arch := nativeArch()
-	fmt.Printf("  [debug] Host architecture: %s\n", arch)
-	fmt.Printf("  [debug] Staging directory: %s\n", stageDir)
 
 	xmlData := append([]byte(nil), autounattendXML...)
 	if arch == "arm64" {
-		fmt.Println("  [debug] Patching autounattend.xml for arm64...")
 		xmlData = bytes.ReplaceAll(xmlData,
 			[]byte(`processorArchitecture="amd64"`),
 			[]byte(`processorArchitecture="arm64"`),
@@ -419,7 +416,7 @@ func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) 
 	if maxCount < 1 {
 		maxCount = 1
 	}
-	fmt.Printf("  [debug] WIM image index: %d\n", maxCount)
+	fmt.Printf("  WIM image index: %d\n", maxCount)
 	xmlData = bytes.ReplaceAll(xmlData,
 		[]byte(`__IMAGE_INDEX__`),
 		[]byte(fmt.Sprintf("%d", maxCount)),
@@ -429,7 +426,7 @@ func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) 
 	if err := os.WriteFile(filepath.Join(stageDir, "autounattend.xml"), xmlData, 0o644); err != nil {
 		return "", err
 	}
-	fmt.Printf("  [debug] Wrote autounattend.xml (%d bytes)\n", len(xmlData))
+
 	// Generate SetupComplete.cmd — Windows runs this as SYSTEM after setup
 	// completes but before the first user logon. Much more reliable than
 	// FirstLogonCommands on Windows 11 ARM, where a race condition with
@@ -442,36 +439,19 @@ func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) 
 for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addstore TrustedPublisher %%d:\cert\vbox-sha256.cer`
 		gaExe = "VBoxWindowsAdditions-arm64.exe"
 	}
-	fmt.Printf("  [debug] GA installer: %s\n", gaExe)
+
 	logLine := "echo [%%DATE%% %%TIME%%]"
 	setupScript := fmt.Sprintf("@echo off\r\n"+
 		"set LOG=C:\\Windows\\Setup\\Scripts\\SetupComplete.log\r\n"+
 		"%[4]s SetupComplete.cmd starting >> %%LOG%%\r\n"+
-		"REM === Create user and grant admin (GA install may reboot) ===\r\n"+
-		"%[4]s Creating user >> %%LOG%%\r\n"+
+		"REM === Create user and grant admin ===\r\n"+
 		"net user dexbox dexbox123 /add >> %%LOG%% 2>&1\r\n"+
-		"%[4]s Adding to Administrators >> %%LOG%%\r\n"+
 		"net localgroup Administrators dexbox /add >> %%LOG%% 2>&1\r\n"+
-		"%[4]s [VERIFY] Admin group members: >> %%LOG%%\r\n"+
-		"net localgroup Administrators >> %%LOG%% 2>&1\r\n"+
 		"REM === Security hardening ===\r\n"+
-		"%[4]s Disabling Defender >> %%LOG%%\r\n"+
 		"powershell -Command Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue\r\n"+
-		"%[4]s [VERIFY] Defender RT monitoring disabled: >> %%LOG%%\r\n"+
-		"powershell -Command \"(Get-MpPreference).DisableRealtimeMonitoring\" >> %%LOG%% 2>&1\r\n"+
-		"%[4]s Adding Defender exclusions >> %%LOG%%\r\n"+
 		"powershell -Command \"Add-MpPreference -ExclusionPath '\\\\vboxsvr\\shared','C:\\dexbox','C:\\Users\\dexbox' -ErrorAction SilentlyContinue\"\r\n"+
-		"%[4]s [VERIFY] Defender exclusion paths: >> %%LOG%%\r\n"+
-		"powershell -Command \"(Get-MpPreference).ExclusionPath\" >> %%LOG%% 2>&1\r\n"+
-		"%[4]s Opening firewall port 8600 >> %%LOG%%\r\n"+
 		"netsh advfirewall firewall add rule name=dexbox-agent dir=in action=allow protocol=TCP localport=8600 >> %%LOG%% 2>&1\r\n"+
-		"%[4]s [VERIFY] Firewall rule: >> %%LOG%%\r\n"+
-		"netsh advfirewall firewall show rule name=dexbox-agent >> %%LOG%% 2>&1\r\n"+
-		"%[4]s Setting execution policy >> %%LOG%%\r\n"+
 		"powershell -Command Set-ExecutionPolicy Bypass -Scope LocalMachine -Force\r\n"+
-		"%[4]s [VERIFY] Execution policy: >> %%LOG%%\r\n"+
-		"powershell -Command Get-ExecutionPolicy >> %%LOG%% 2>&1\r\n"+
-		"%[4]s Hardening complete >> %%LOG%%\r\n"+
 		"REM === Results Summary ===\r\n"+
 		"echo ========================================== >> %%LOG%%\r\n"+
 		"%[4]s === HARDENING RESULTS SUMMARY === >> %%LOG%%\r\n"+
@@ -490,20 +470,15 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 		"REM === Guest Additions (may trigger reboot, must be last) ===\r\n"+
 		"%[4]s Installing certificates >> %%LOG%%\r\n"+
 		"%[1]s\r\n"+
-		"%[4]s Waiting for drivers >> %%LOG%%\r\n"+
 		"timeout /t 10 /nobreak\r\n"+
 		"%[4]s Launching GA installer >> %%LOG%%\r\n"+
 		"for %%%%d in (D E F G H) do if exist %%%%d:\\%[2]s %%%%d:\\%[2]s /S\r\n"+
 		"%[4]s Scheduling reboot >> %%LOG%%\r\n"+
 		"shutdown /r /t 30\r\n",
 		certTool, gaExe, gaExe, logLine)
-	_ = logLine
 	if err := os.WriteFile(filepath.Join(stageDir, "SetupComplete.cmd"), []byte(setupScript), 0o644); err != nil {
 		return "", err
 	}
-	fmt.Println("\n--- DEBUG: Generated SetupComplete.cmd ---")
-	fmt.Println(setupScript)
-	fmt.Println("--- END SetupComplete.cmd ---")
 
 	// On ARM, add a startup.nsh EFI shell script as a fallback. If the
 	// NVRAM boot entry is missing or invalid, OVMF drops to the EFI shell
@@ -533,16 +508,13 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 	if err := os.Chmod(autounattendISO, 0o600); err != nil {
 		return "", fmt.Errorf("chmod autounattend ISO: %w", err)
 	}
-	fmt.Println("  [debug] autounattend ISO created successfully")
 
 	// Attach the Windows installer ISO to SATA port 1.
-	fmt.Printf("  [debug] Attaching Windows ISO to SATA port 1: %s\n", isoPath)
 	if err := AttachISO(ctx, vmName, isoPath); err != nil {
 		return "", fmt.Errorf("attach Windows ISO: %w", err)
 	}
 
 	// Attach the autounattend ISO to SATA port 2.
-	fmt.Println("  [debug] Attaching autounattend ISO to SATA port 2")
 	if _, err := RunVBoxManage(ctx, "storageattach", vmName,
 		"--storagectl", "SATA", "--port", "2", "--device", "0",
 		"--type", "dvddrive", "--medium", autounattendISO); err != nil {
@@ -561,7 +533,7 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 	if err != nil {
 		return "", fmt.Errorf("guest additions: %w", err)
 	}
-	fmt.Printf("  [debug] Attaching Guest Additions ISO to SATA port 3: %s\n", gaISO)
+
 	if _, err := RunVBoxManage(ctx, "storageattach", vmName,
 		"--storagectl", "SATA", "--port", "3", "--device", "0",
 		"--type", "dvddrive", "--medium", gaISO); err != nil {
@@ -575,7 +547,7 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 		if err != nil {
 			return "", fmt.Errorf("virtio-win ISO: %w", err)
 		}
-		fmt.Printf("  [debug] Attaching virtio-win ISO to SATA port 4: %s\n", virtioISO)
+
 		if _, err := RunVBoxManage(ctx, "storageattach", vmName,
 			"--storagectl", "SATA", "--port", "4", "--device", "0",
 			"--type", "dvddrive", "--medium", virtioISO); err != nil {
