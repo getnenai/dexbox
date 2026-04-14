@@ -122,7 +122,22 @@ func Install(ctx context.Context, vmName, isoPath, user, pass string) error {
 		return fmt.Errorf("waiting for installation: %w", err)
 	}
 
-	// Step 7: Done
+	// Step 7: Retrieve setup logs from VM for diagnostics
+	fmt.Println("\n--- Retrieving setup logs from VM ---")
+	setupLogPath := `C:\Windows\Setup\Scripts\SetupComplete.log`
+	out, err := RunVBoxManage(ctx, "guestcontrol", vmName, "run",
+		"--exe", "cmd.exe",
+		"--username", user, "--password", pass,
+		"--", "cmd.exe", "/c", "type", setupLogPath)
+	if err == nil {
+		fmt.Printf("\n=== SetupComplete.log ===\n%s\n=== END ===\n", out)
+	} else {
+		fmt.Printf("Could not retrieve SetupComplete.log: %v\n", err)
+		fmt.Println("You can retrieve it manually after login:")
+		fmt.Printf("  VBoxManage guestcontrol %s run --exe cmd.exe --username %s --password <REDACTED> -- cmd.exe /c type %s\n", vmName, user, setupLogPath)
+	}
+
+	// Step 8: Done
 	fmt.Println("")
 	fmt.Println("Installation complete!")
 	fmt.Printf("  VM name:    %s\n", vmName)
@@ -359,8 +374,10 @@ func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) 
 	}
 	defer os.RemoveAll(stageDir)
 
+	arch := nativeArch()
+
 	xmlData := append([]byte(nil), autounattendXML...)
-	if nativeArch() == "arm64" {
+	if arch == "arm64" {
 		xmlData = bytes.ReplaceAll(xmlData,
 			[]byte(`processorArchitecture="amd64"`),
 			[]byte(`processorArchitecture="arm64"`),
@@ -399,6 +416,7 @@ func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) 
 	if maxCount < 1 {
 		maxCount = 1
 	}
+	fmt.Printf("  WIM image index: %d\n", maxCount)
 	xmlData = bytes.ReplaceAll(xmlData,
 		[]byte(`__IMAGE_INDEX__`),
 		[]byte(fmt.Sprintf("%d", maxCount)),
@@ -415,19 +433,49 @@ func unattendedInstall(ctx context.Context, vmName, isoPath, user, pass string) 
 	// driver initialization causes FirstLogonCommands to silently fail.
 	certTool := `for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha1.cer %%d:\cert\VBoxCertUtil.exe add-trusted-publisher %%d:\cert\vbox-sha1.cer %%d:\cert\vbox-sha256.cer`
 	gaExe := "VBoxWindowsAdditions.exe"
-	if nativeArch() == "arm64" {
+	if arch == "arm64" {
 		// Native certutil instead of x86 VBoxCertUtil; arm64 installer name.
 		certTool = `for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha1.cer certutil.exe -addstore TrustedPublisher %%d:\cert\vbox-sha1.cer
 for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addstore TrustedPublisher %%d:\cert\vbox-sha256.cer`
 		gaExe = "VBoxWindowsAdditions-arm64.exe"
 	}
+
+	logLine := "echo [%%DATE%% %%TIME%%]"
 	setupScript := fmt.Sprintf("@echo off\r\n"+
-		"%s\r\n"+
-		"REM Wait for ARM drivers to finish initializing\r\n"+
+		"set LOG=C:\\Windows\\Setup\\Scripts\\SetupComplete.log\r\n"+
+		"%[4]s SetupComplete.cmd starting >> %%LOG%%\r\n"+
+		"REM === Create user and grant admin ===\r\n"+
+		"net user %[5]s %[6]s /add >> %%LOG%% 2>&1\r\n"+
+		"net localgroup Administrators %[5]s /add >> %%LOG%% 2>&1\r\n"+
+		"REM === Security hardening ===\r\n"+
+		"powershell -Command Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue\r\n"+
+		"powershell -Command \"Add-MpPreference -ExclusionPath '\\\\vboxsvr\\shared','C:\\dexbox','C:\\Users\\%[5]s' -ErrorAction SilentlyContinue\"\r\n"+
+		"netsh advfirewall firewall add rule name=dexbox-agent dir=in action=allow protocol=TCP localport=8600 >> %%LOG%% 2>&1\r\n"+
+		"powershell -Command Set-ExecutionPolicy Bypass -Scope LocalMachine -Force\r\n"+
+		"REM === Results Summary ===\r\n"+
+		"echo ========================================== >> %%LOG%%\r\n"+
+		"%[4]s === HARDENING RESULTS SUMMARY === >> %%LOG%%\r\n"+
+		"echo ========================================== >> %%LOG%%\r\n"+
+		"echo --- Admin Group Members --- >> %%LOG%%\r\n"+
+		"net localgroup Administrators >> %%LOG%% 2>&1\r\n"+
+		"echo --- Defender Real-time Monitoring --- >> %%LOG%%\r\n"+
+		"powershell -Command \"(Get-MpPreference).DisableRealtimeMonitoring\" >> %%LOG%% 2>&1\r\n"+
+		"echo --- Defender Exclusion Paths --- >> %%LOG%%\r\n"+
+		"powershell -Command \"(Get-MpPreference).ExclusionPath\" >> %%LOG%% 2>&1\r\n"+
+		"echo --- Firewall Rule (dexbox-agent) --- >> %%LOG%%\r\n"+
+		"netsh advfirewall firewall show rule name=dexbox-agent >> %%LOG%% 2>&1\r\n"+
+		"echo --- Execution Policy --- >> %%LOG%%\r\n"+
+		"powershell -Command Get-ExecutionPolicy >> %%LOG%% 2>&1\r\n"+
+		"echo ========================================== >> %%LOG%%\r\n"+
+		"REM === Guest Additions (may trigger reboot, must be last) ===\r\n"+
+		"%[4]s Installing certificates >> %%LOG%%\r\n"+
+		"%[1]s\r\n"+
 		"timeout /t 10 /nobreak\r\n"+
-		"for %%%%d in (D E F G H) do if exist %%%%d:\\%s %%%%d:\\%s /S\r\n"+
+		"%[4]s Launching GA installer >> %%LOG%%\r\n"+
+		"for %%%%d in (D E F G H) do if exist %%%%d:\\%[2]s %%%%d:\\%[2]s /S\r\n"+
+		"%[4]s Scheduling reboot >> %%LOG%%\r\n"+
 		"shutdown /r /t 30\r\n",
-		certTool, gaExe, gaExe)
+		certTool, gaExe, gaExe, logLine, user, pass)
 	if err := os.WriteFile(filepath.Join(stageDir, "SetupComplete.cmd"), []byte(setupScript), 0o644); err != nil {
 		return "", err
 	}
@@ -485,6 +533,7 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 	if err != nil {
 		return "", fmt.Errorf("guest additions: %w", err)
 	}
+
 	if _, err := RunVBoxManage(ctx, "storageattach", vmName,
 		"--storagectl", "SATA", "--port", "3", "--device", "0",
 		"--type", "dvddrive", "--medium", gaISO); err != nil {
@@ -493,11 +542,12 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 
 	// On ARM, attach the virtio-win ISO to SATA port 4 so Windows PE can
 	// load the NetKVM network driver during installation.
-	if nativeArch() == "arm64" {
+	if arch == "arm64" {
 		virtioISO, err := ensureVirtioISO(ctx)
 		if err != nil {
 			return "", fmt.Errorf("virtio-win ISO: %w", err)
 		}
+
 		if _, err := RunVBoxManage(ctx, "storageattach", vmName,
 			"--storagectl", "SATA", "--port", "4", "--device", "0",
 			"--type", "dvddrive", "--medium", virtioISO); err != nil {
