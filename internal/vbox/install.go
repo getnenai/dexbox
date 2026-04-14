@@ -127,14 +127,14 @@ func Install(ctx context.Context, vmName, isoPath, user, pass string) error {
 	setupLogPath := `C:\Windows\Setup\Scripts\SetupComplete.log`
 	out, err := RunVBoxManage(ctx, "guestcontrol", vmName, "run",
 		"--exe", "cmd.exe",
-		"--username", "dexbox", "--password", "dexbox123",
+		"--username", user, "--password", pass,
 		"--", "cmd.exe", "/c", "type", setupLogPath)
 	if err == nil {
 		fmt.Printf("\n=== SetupComplete.log ===\n%s\n=== END ===\n", out)
 	} else {
 		fmt.Printf("Could not retrieve SetupComplete.log: %v\n", err)
 		fmt.Println("You can retrieve it manually after login:")
-		fmt.Printf("  VBoxManage guestcontrol %s run --exe cmd.exe --username dexbox --password dexbox123 -- cmd.exe /c type %s\n", vmName, setupLogPath)
+		fmt.Printf("  VBoxManage guestcontrol %s run --exe cmd.exe --username %s --password <REDACTED> -- cmd.exe /c type %s\n", vmName, user, setupLogPath)
 	}
 
 	// Step 8: Done
@@ -445,11 +445,11 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 		"set LOG=C:\\Windows\\Setup\\Scripts\\SetupComplete.log\r\n"+
 		"%[4]s SetupComplete.cmd starting >> %%LOG%%\r\n"+
 		"REM === Create user and grant admin ===\r\n"+
-		"net user dexbox dexbox123 /add >> %%LOG%% 2>&1\r\n"+
-		"net localgroup Administrators dexbox /add >> %%LOG%% 2>&1\r\n"+
+		"net user %[5]s %[6]s /add >> %%LOG%% 2>&1\r\n"+
+		"net localgroup Administrators %[5]s /add >> %%LOG%% 2>&1\r\n"+
 		"REM === Security hardening ===\r\n"+
 		"powershell -Command Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue\r\n"+
-		"powershell -Command \"Add-MpPreference -ExclusionPath '\\\\vboxsvr\\shared','C:\\dexbox','C:\\Users\\dexbox' -ErrorAction SilentlyContinue\"\r\n"+
+		"powershell -Command \"Add-MpPreference -ExclusionPath '\\\\vboxsvr\\shared','C:\\dexbox','C:\\Users\\%[5]s' -ErrorAction SilentlyContinue\"\r\n"+
 		"netsh advfirewall firewall add rule name=dexbox-agent dir=in action=allow protocol=TCP localport=8600 >> %%LOG%% 2>&1\r\n"+
 		"powershell -Command Set-ExecutionPolicy Bypass -Scope LocalMachine -Force\r\n"+
 		"REM === Results Summary ===\r\n"+
@@ -475,7 +475,7 @@ for %%d in (D E F G H) do if exist %%d:\cert\vbox-sha256.cer certutil.exe -addst
 		"for %%%%d in (D E F G H) do if exist %%%%d:\\%[2]s %%%%d:\\%[2]s /S\r\n"+
 		"%[4]s Scheduling reboot >> %%LOG%%\r\n"+
 		"shutdown /r /t 30\r\n",
-		certTool, gaExe, gaExe, logLine)
+		certTool, gaExe, gaExe, logLine, user, pass)
 	if err := os.WriteFile(filepath.Join(stageDir, "SetupComplete.cmd"), []byte(setupScript), 0o644); err != nil {
 		return "", err
 	}
