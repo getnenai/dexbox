@@ -32,7 +32,8 @@ const (
 // vmName is the name for the new VirtualBox VM.
 // isoPath is the path to a user-supplied Windows ISO.
 // user and pass are the guest OS account credentials baked into the unattended install.
-func Install(ctx context.Context, vmName, isoPath, user, pass string) error {
+// cfg controls VM resources; use DefaultVMConfig() for defaults.
+func Install(ctx context.Context, vmName, isoPath, user, pass string, cfg VMConfig) error {
 	// Step 1: Check/install VirtualBox
 	if err := ensureVirtualBox(); err != nil {
 		return fmt.Errorf("VirtualBox installation: %w", err)
@@ -62,7 +63,6 @@ func Install(ctx context.Context, vmName, isoPath, user, pass string) error {
 		}
 	}
 	if !VMExists(ctx, vmName) {
-		cfg := DefaultVMConfig()
 		if err := CreateVM(ctx, vmName, cfg); err != nil {
 			return fmt.Errorf("create VM: %w", err)
 		}

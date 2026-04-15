@@ -193,8 +193,26 @@ func DefaultVMConfig() VMConfig {
 	}
 }
 
+// Validate checks that the VM configuration has sane resource bounds.
+func (c VMConfig) Validate() error {
+	if c.CPUs < 1 {
+		return fmt.Errorf("cpus must be at least 1 (got %d)", c.CPUs)
+	}
+	if c.MemoryMB < 2048 {
+		return fmt.Errorf("memory must be at least 2048 MB (got %d MB)", c.MemoryMB)
+	}
+	if c.DiskGB < 32 {
+		return fmt.Errorf("disk must be at least 32 GB (got %d GB)", c.DiskGB)
+	}
+	return nil
+}
+
 // CreateVM registers and configures a new VM. It does NOT start it.
 func CreateVM(ctx context.Context, name string, cfg VMConfig) error {
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid VM config: %w", err)
+	}
+
 	ostype := "Windows11_64"
 	if nativeArch() == "arm64" {
 		ostype = "Windows11_arm64"
