@@ -52,7 +52,10 @@ The `--iso` is required for ARM hosts like Apple Silicon only.
 
 ```bash
 dexbox create vm windows-1 --iso /path/to/windows.iso
+dexbox create vm windows-big --iso /path/to/windows.iso --cpus 8 --memory 16 --disk 128
 ```
+
+Defaults are 4 CPUs / 8 GB RAM / 64 GB disk. Clones inherit the source VM's specs.
 
 Start the tool server (also starts vboxwebsrv and guacd if Docker is available)
 
