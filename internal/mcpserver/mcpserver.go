@@ -26,11 +26,17 @@ type listDesktopsInput struct {
 
 type createDesktopInput struct {
 	Name     string `json:"name" jsonschema:"Unique name for the desktop"`
-	Type     string `json:"type" jsonschema:"Desktop type (currently only rdp is supported via API)"`
-	Host     string `json:"host" jsonschema:"RDP host address"`
-	Port     int    `json:"port,omitempty" jsonschema:"RDP port (default 3389)"`
-	Username string `json:"username" jsonschema:"RDP username"`
-	Password string `json:"password" jsonschema:"RDP password"`
+	Type     string `json:"type" jsonschema:"Desktop type: rdp or vm"`
+	// RDP fields
+	Host     string `json:"host,omitempty" jsonschema:"RDP host address (type=rdp)"`
+	Port     int    `json:"port,omitempty" jsonschema:"RDP port (default 3389, type=rdp)"`
+	Username string `json:"username,omitempty" jsonschema:"Username (RDP: login user; VM: guest OS account, default dexbox)"`
+	Password string `json:"password,omitempty" jsonschema:"Password (RDP: login password; VM: guest OS password, default dexbox123)"`
+	// VM fields
+	ISOPath  string `json:"iso_path,omitempty" jsonschema:"Path to Windows ISO on the host (type=vm, required)"`
+	CPUs     int    `json:"cpus,omitempty" jsonschema:"Number of virtual CPUs for the VM (type=vm, default 4)"`
+	MemoryGB int    `json:"memory_gb,omitempty" jsonschema:"RAM in GB for the VM (type=vm, default 8)"`
+	DiskGB   int    `json:"disk_gb,omitempty" jsonschema:"Disk size in GB for the VM (type=vm, default 64)"`
 }
 
 type desktopNameInput struct {
@@ -214,7 +220,7 @@ func New(baseURL string) *mcp.Server {
 	// create_desktop
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "create_desktop",
-		Description: "Register a new RDP desktop connection.",
+		Description: "Create a new desktop: register an RDP connection (type=rdp) or provision a Windows VM from an ISO (type=vm). VM provisioning blocks for 15-30 minutes while Windows installs.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input createDesktopInput) (*mcp.CallToolResult, empty, error) {
 		body, err := doRequest(ctx, baseURL, http.MethodPost, "/desktops", input)
 		if err != nil {
