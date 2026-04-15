@@ -32,14 +32,29 @@ func runVBoxManageTimeout(ctx context.Context, timeout time.Duration, args ...st
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	// Collect values that follow --password flags so they can be scrubbed
+	// from any output or error text before it leaves this function.
+	var sensitiveValues []string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--password" {
+			sensitiveValues = append(sensitiveValues, args[i+1])
+		}
+	}
+	redact := func(s string) string {
+		for _, v := range sensitiveValues {
+			s = strings.ReplaceAll(s, v, "***")
+		}
+		return s
+	}
+
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", fmt.Errorf("VBoxManage %s: %s", args[0], msg)
+		return "", fmt.Errorf("VBoxManage %s: %s", args[0], redact(msg))
 	}
-	return stdout.String(), nil
+	return redact(stdout.String()), nil
 }
 
 // Screenshot captures a PNG screenshot of the VM display to a temp file,
