@@ -833,10 +833,10 @@ Example:
 				Height:     height,
 				IgnoreCert: ignoreCert,
 				Security:   security,
+				DriveName:  driveName,
 			}
 			if driveName != "" {
 				cfg.DriveEnabled = true
-				cfg.DriveName = driveName
 			}
 
 			if err := store.Add(name, cfg); err != nil {
@@ -859,7 +859,7 @@ Example:
 	c.Flags().IntVar(&height, "height", 768, "Display height in pixels")
 	c.Flags().BoolVar(&ignoreCert, "ignore-cert", true, "Ignore certificate validation")
 	c.Flags().StringVar(&security, "security", "", "RDP security mode: any (default), rdp, nla, tls (use rdp for VirtualBox VRDE)")
-	c.Flags().StringVar(&driveName, "drive-name", "", "Enable drive redirection with this Windows share name (e.g. MyDrive)")
+	c.Flags().StringVar(&driveName, "drive-name", "", "Enable RDP drive redirection with this Windows share name (e.g. \"Agent\"). Leave empty to disable; exposes ~/.dexbox/shared to the Windows guest as a mapped drive.")
 	_ = c.MarkFlagRequired("host")
 	_ = c.MarkFlagRequired("user")
 	_ = c.MarkFlagRequired("pass")
