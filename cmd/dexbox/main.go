@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -45,6 +46,15 @@ import (
 var version = "dev"
 
 func main() {
+	// Route the standard logger to stderr explicitly. Go's `log` package
+	// already defaults to os.Stderr, but subcommands like `dexbox run
+	// ... --action screenshot` stream raw PNG bytes to os.Stdout — any
+	// stray log write to stdout would corrupt that stream for callers
+	// doing `dexbox run ... > shot.png`. Pinning the output here makes
+	// the stdout = payload invariant robust against future code or
+	// dependencies that might call log.SetOutput(os.Stdout).
+	log.SetOutput(os.Stderr)
+
 	var envFile string
 
 	root := &cobra.Command{
