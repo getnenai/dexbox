@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -400,7 +402,42 @@ type idleTimer struct {
 	session *BringRDP
 }
 
-const idleDisconnectDelay = 30 * time.Second
+// defaultIdleDisconnectDelay is how long the manager waits after the last
+// viewer/agent has left before tearing down a persistent RDP session. Five
+// minutes is chosen for agent-paced workflows: a CUA pausing for LLM
+// generation can easily go 30-60s between tool calls, and even multi-minute
+// analysis pauses. Shorter values (the previous 30s) caused the RDP session
+// to drop between tool calls, which on Windows triggers the disconnect-lock
+// behaviour and surfaces LogonUI on the next screenshot.
+const defaultIdleDisconnectDelay = 300 * time.Second
+
+// minIdleDisconnectDelay gates pathologically-low values configured via the
+// environment. Anything below this floor would reintroduce the disconnect
+// races the default is meant to avoid.
+const minIdleDisconnectDelay = 30 * time.Second
+
+// idleDisconnectDelay is read once at package init from the
+// DEXBOX_IDLE_DISCONNECT_SECONDS environment variable. Parsing is permissive:
+// missing, non-numeric, or below-floor values fall back to the default.
+var idleDisconnectDelay = loadIdleDisconnectDelay()
+
+func loadIdleDisconnectDelay() time.Duration {
+	raw, ok := os.LookupEnv("DEXBOX_IDLE_DISCONNECT_SECONDS")
+	if !ok {
+		return defaultIdleDisconnectDelay
+	}
+	secs, err := strconv.Atoi(raw)
+	if err != nil || secs <= 0 {
+		log.Printf("[manager] invalid DEXBOX_IDLE_DISCONNECT_SECONDS=%q; using default %v", raw, defaultIdleDisconnectDelay)
+		return defaultIdleDisconnectDelay
+	}
+	d := time.Duration(secs) * time.Second
+	if d < minIdleDisconnectDelay {
+		log.Printf("[manager] DEXBOX_IDLE_DISCONNECT_SECONDS=%d below floor %v; clamping", secs, minIdleDisconnectDelay)
+		return minIdleDisconnectDelay
+	}
+	return d
+}
 
 // ViewerConnected is called when a web viewer successfully opens a tunnel for
 // the named desktop. It increments the viewer ref-count and cancels any pending

@@ -3,6 +3,7 @@ package desktop
 import (
 	"context"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -480,5 +481,43 @@ func TestManagerUp_RDP_DriveEnabled_GuacdListening(t *testing.T) {
 		if d.Type() != "rdp" {
 			t.Errorf("expected type rdp, got %s", d.Type())
 		}
+	}
+}
+
+// TestLoadIdleDisconnectDelay covers the DEXBOX_IDLE_DISCONNECT_SECONDS env
+// var parsing: default when unset, clamp when below floor, honor valid values,
+// and fall back on garbage. We don't test timer behaviour here; the existing
+// tests already verify the scheduling logic works, and the only thing the env
+// var changes is the delay constant.
+func TestLoadIdleDisconnectDelay(t *testing.T) {
+	cases := []struct {
+		name  string
+		set   bool
+		value string
+		want  time.Duration
+	}{
+		{"unset uses default", false, "", defaultIdleDisconnectDelay},
+		{"valid value honoured", true, "600", 600 * time.Second},
+		{"below floor is clamped", true, "5", minIdleDisconnectDelay},
+		{"zero falls back to default", true, "0", defaultIdleDisconnectDelay},
+		{"negative falls back to default", true, "-10", defaultIdleDisconnectDelay},
+		{"garbage falls back to default", true, "notanumber", defaultIdleDisconnectDelay},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("DEXBOX_IDLE_DISCONNECT_SECONDS", tc.value)
+			} else {
+				// Setenv + Unsetenv dance: ensure the var is not set. Setenv
+				// first is required because Go's test env sandbox only restores
+				// vars it has seen touched.
+				t.Setenv("DEXBOX_IDLE_DISCONNECT_SECONDS", "")
+				_ = os.Unsetenv("DEXBOX_IDLE_DISCONNECT_SECONDS")
+			}
+			got := loadIdleDisconnectDelay()
+			if got != tc.want {
+				t.Errorf("loadIdleDisconnectDelay() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
