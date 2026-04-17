@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 // mockDesktop implements Desktop for testing without real VBox or RDP.
@@ -519,5 +521,22 @@ func TestLoadIdleDisconnectDelay(t *testing.T) {
 				t.Errorf("loadIdleDisconnectDelay() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNewManager_LoadsIdleDisconnectDelayAfterEnvIsSet(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), ".env")
+	if err := godotenv.Write(map[string]string{
+		"DEXBOX_IDLE_DISCONNECT_SECONDS": "600",
+	}, envPath); err != nil {
+		t.Fatalf("godotenv.Write: %v", err)
+	}
+	if err := godotenv.Load(envPath); err != nil {
+		t.Fatalf("godotenv.Load: %v", err)
+	}
+
+	mgr := NewManager(nil, NewConnectionStore(t.TempDir()), "localhost:4822", "")
+	if mgr.idleDisconnectDelay != 600*time.Second {
+		t.Fatalf("mgr.idleDisconnectDelay = %v, want %v", mgr.idleDisconnectDelay, 600*time.Second)
 	}
 }

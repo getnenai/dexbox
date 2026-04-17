@@ -53,6 +53,8 @@ type Manager struct {
 	guacdAddr string
 	sharedDir string
 
+	idleDisconnectDelay time.Duration
+
 	sessions map[string]Desktop
 	mu       sync.Mutex
 
@@ -73,14 +75,15 @@ type Manager struct {
 // NewManager creates a unified desktop manager.
 func NewManager(vboxMgr *vbox.Manager, store *ConnectionStore, guacdAddr string, sharedDir string) *Manager {
 	return &Manager{
-		vbox:        vboxMgr,
-		store:       store,
-		guacdAddr:   guacdAddr,
-		sharedDir:   sharedDir,
-		sessions:    make(map[string]Desktop),
-		subs:        make(map[string][]chan SessionEvent),
-		viewerCount: make(map[string]int),
-		idleTimers:  make(map[string]idleTimer),
+		vbox:                vboxMgr,
+		store:               store,
+		guacdAddr:           guacdAddr,
+		sharedDir:           sharedDir,
+		idleDisconnectDelay: loadIdleDisconnectDelay(),
+		sessions:            make(map[string]Desktop),
+		subs:                make(map[string][]chan SessionEvent),
+		viewerCount:         make(map[string]int),
+		idleTimers:          make(map[string]idleTimer),
 	}
 }
 
@@ -416,11 +419,6 @@ const defaultIdleDisconnectDelay = 300 * time.Second
 // races the default is meant to avoid.
 const minIdleDisconnectDelay = 30 * time.Second
 
-// idleDisconnectDelay is read once at package init from the
-// DEXBOX_IDLE_DISCONNECT_SECONDS environment variable. Parsing is permissive:
-// missing, non-numeric, or below-floor values fall back to the default.
-var idleDisconnectDelay = loadIdleDisconnectDelay()
-
 func loadIdleDisconnectDelay() time.Duration {
 	raw, ok := os.LookupEnv("DEXBOX_IDLE_DISCONNECT_SECONDS")
 	if !ok {
@@ -506,10 +504,10 @@ func (m *Manager) scheduleIdleDisconnectIfIdle(name string) {
 	if _, pending := m.idleTimers[name]; pending {
 		return
 	}
-	log.Printf("[manager] scheduling idle disconnect for %s in %v", name, idleDisconnectDelay)
+	log.Printf("[manager] scheduling idle disconnect for %s in %v", name, m.idleDisconnectDelay)
 	session := rdpSession
 	m.idleTimers[name] = idleTimer{
-		timer: time.AfterFunc(idleDisconnectDelay, func() {
+		timer: time.AfterFunc(m.idleDisconnectDelay, func() {
 			m.disconnectIdle(name)
 		}),
 		session: session,
