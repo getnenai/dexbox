@@ -3,10 +3,13 @@ package desktop
 import (
 	"context"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 // mockDesktop implements Desktop for testing without real VBox or RDP.
@@ -480,5 +483,60 @@ func TestManagerUp_RDP_DriveEnabled_GuacdListening(t *testing.T) {
 		if d.Type() != "rdp" {
 			t.Errorf("expected type rdp, got %s", d.Type())
 		}
+	}
+}
+
+// TestLoadIdleDisconnectDelay covers the DEXBOX_IDLE_DISCONNECT_SECONDS env
+// var parsing: default when unset, clamp when below floor, honor valid values,
+// and fall back on garbage. We don't test timer behaviour here; the existing
+// tests already verify the scheduling logic works, and the only thing the env
+// var changes is the delay constant.
+func TestLoadIdleDisconnectDelay(t *testing.T) {
+	cases := []struct {
+		name  string
+		set   bool
+		value string
+		want  time.Duration
+	}{
+		{"unset uses default", false, "", defaultIdleDisconnectDelay},
+		{"valid value honoured", true, "600", 600 * time.Second},
+		{"below floor is clamped", true, "5", minIdleDisconnectDelay},
+		{"zero falls back to default", true, "0", defaultIdleDisconnectDelay},
+		{"negative falls back to default", true, "-10", defaultIdleDisconnectDelay},
+		{"garbage falls back to default", true, "notanumber", defaultIdleDisconnectDelay},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("DEXBOX_IDLE_DISCONNECT_SECONDS", tc.value)
+			} else {
+				// Setenv + Unsetenv dance: ensure the var is not set. Setenv
+				// first is required because Go's test env sandbox only restores
+				// vars it has seen touched.
+				t.Setenv("DEXBOX_IDLE_DISCONNECT_SECONDS", "")
+				_ = os.Unsetenv("DEXBOX_IDLE_DISCONNECT_SECONDS")
+			}
+			got := loadIdleDisconnectDelay()
+			if got != tc.want {
+				t.Errorf("loadIdleDisconnectDelay() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewManager_LoadsIdleDisconnectDelayAfterEnvIsSet(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), ".env")
+	if err := godotenv.Write(map[string]string{
+		"DEXBOX_IDLE_DISCONNECT_SECONDS": "600",
+	}, envPath); err != nil {
+		t.Fatalf("godotenv.Write: %v", err)
+	}
+	if err := godotenv.Load(envPath); err != nil {
+		t.Fatalf("godotenv.Load: %v", err)
+	}
+
+	mgr := NewManager(nil, NewConnectionStore(t.TempDir()), "localhost:4822", "")
+	if mgr.idleDisconnectDelay != 600*time.Second {
+		t.Fatalf("mgr.idleDisconnectDelay = %v, want %v", mgr.idleDisconnectDelay, 600*time.Second)
 	}
 }

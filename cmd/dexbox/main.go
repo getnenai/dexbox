@@ -153,9 +153,15 @@ func cmdStart() *cobra.Command {
 				// We never send on it, so it blocks forever.
 			}
 
-			// Start guacd for RDP support (native binary > Docker > skip)
+			// Start guacd for RDP support (native binary > Docker > skip).
+			// At system boot, `dexbox start` can race Docker's own startup:
+			// EnsureRunning fails with "docker is not available..." for the
+			// first ~5-15 seconds of uptime. A single attempt leaves the
+			// server in a "no RDP" state for its entire lifetime even though
+			// Docker comes up seconds later. Retry with backoff so a
+			// slow-starting daemon doesn't permanently disable RDP.
 			fmt.Println("Starting guacd...")
-			if err := guacd.EnsureRunning(ctx, config.SharedDir); err != nil {
+			if err := ensureGuacdWithRetry(ctx, config.SharedDir, 60*time.Second, 1*time.Second); err != nil {
 				fmt.Printf("Warning: failed to start guacd: %v\n", err)
 				fmt.Println("RDP connections will not be available.")
 			} else {
@@ -262,6 +268,40 @@ func parseSoapPort() string {
 		return "18083"
 	}
 	return u.Port()
+}
+
+// ensureGuacdWithRetry calls guacd.EnsureRunning repeatedly, tolerating the
+// transient failure mode where Docker is still initializing at system boot.
+// It returns nil as soon as guacd is ready, or the most recent error once the
+// timeout elapses. A fast short-circuit avoids the retry loop when EnsureRunning
+// succeeds on the first try (the common case for manual `dexbox start`).
+func ensureGuacdWithRetry(ctx context.Context, sharedDir string, timeout, poll time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	attempt := 0
+	for {
+		attempt++
+		if err := guacd.EnsureRunning(ctx, sharedDir); err == nil {
+			if attempt > 1 {
+				fmt.Printf("guacd became ready after %d attempts\n", attempt)
+			}
+			return nil
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		// Log the first failure so operators can see why we're still waiting.
+		if attempt == 1 {
+			fmt.Printf("guacd not ready yet (%v); retrying for up to %v...\n", lastErr, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
 }
 
 // waitForPort polls until a TCP connection to localhost:port succeeds or the timeout expires.
