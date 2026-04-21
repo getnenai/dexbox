@@ -7,6 +7,8 @@ import (
 	"image"
 	"image/png"
 	"log"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,6 +59,46 @@ func resolveKeyDelay(cfg RDPConfig) (time.Duration, error) {
 	default:
 		return defaultKeyDelayMs * time.Millisecond, nil
 	}
+}
+
+// defaultKeySyncWaitCap is the hard ceiling applied to the per-keystroke
+// sync barrier in typeText. Without it, maxWait = 4×FrameInterval scales
+// linearly with whatever EMA guacd has observed, and on a static Windows
+// desktop (no focused input field, cursor blinking every ~29 s as the only
+// display change) that EMA balloons into the tens of seconds — making a
+// single character take 50–115 s in the field. 1.5 s is ~75× the real
+// per-keystroke drain time on healthy hardware, which preserves orders-of-
+// magnitude headroom (the same spirit as the 600 ms floor for fast frames)
+// while bounding worst-case latency. If FreeRDP genuinely needed longer,
+// the character may drop and the agent retries at the application level.
+const defaultKeySyncWaitCap = 1500 * time.Millisecond
+
+// minKeySyncWaitCap gates pathologically-low values configured via the
+// environment. Anything under this floor leaves no margin above realistic
+// per-keystroke drain times (~20 ms) and would regress typing reliability.
+const minKeySyncWaitCap = 100 * time.Millisecond
+
+// keySyncWaitCap is read once at package init from the
+// DEXBOX_KEY_SYNC_WAIT_MS environment variable. Parsing is permissive:
+// missing, non-numeric, or below-floor values fall back to the default.
+var keySyncWaitCap = loadKeySyncWaitCap()
+
+func loadKeySyncWaitCap() time.Duration {
+	raw, ok := os.LookupEnv("DEXBOX_KEY_SYNC_WAIT_MS")
+	if !ok {
+		return defaultKeySyncWaitCap
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms <= 0 {
+		log.Printf("[rdp] invalid DEXBOX_KEY_SYNC_WAIT_MS=%q; using default %v", raw, defaultKeySyncWaitCap)
+		return defaultKeySyncWaitCap
+	}
+	d := time.Duration(ms) * time.Millisecond
+	if d < minKeySyncWaitCap {
+		log.Printf("[rdp] DEXBOX_KEY_SYNC_WAIT_MS=%d below floor %v; clamping", ms, minKeySyncWaitCap)
+		return minKeySyncWaitCap
+	}
+	return d
 }
 
 // syncTracker counts Guacamole sync instructions received from guacd. It is
@@ -751,6 +793,16 @@ func typeText(c Client, text string, delay time.Duration, st *syncTracker) error
 			maxWait := 4 * fi
 			if maxWait < 600*time.Millisecond {
 				maxWait = 600 * time.Millisecond
+			}
+			// On a static Windows desktop the EMA of the inter-sync interval
+			// can grow into the tens of seconds (the only display change is a
+			// cursor blink every ~29 s), at which point 4×FrameInterval turns
+			// a single character into a 50–115 s stall. Cap the wait so the
+			// barrier still provides its fast-case guarantee without
+			// pessimising the slow-cadence case. Tunable via
+			// DEXBOX_KEY_SYNC_WAIT_MS.
+			if maxWait > keySyncWaitCap {
+				maxWait = keySyncWaitCap
 			}
 			st.waitFor(baseline+2, 0, maxWait)
 		} else if keyHold > 0 {

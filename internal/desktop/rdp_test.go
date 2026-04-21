@@ -5,6 +5,7 @@ import (
 	"errors"
 	"image"
 	"image/color"
+	"os"
 	"testing"
 	"time"
 
@@ -631,6 +632,86 @@ func TestResolveKeyDelay_Negative(t *testing.T) {
 	_, err := resolveKeyDelay(RDPConfig{KeyDelayMs: -1})
 	if err == nil {
 		t.Error("expected error for negative KeyDelayMs, got nil")
+	}
+}
+
+// --- typeText sync-wait cap --------------------------------------------
+
+// TestTypeText_SyncWaitCappedOnStaticDesktop is the regression test for the
+// 50–115 s-per-character stall observed in the field when typing onto a
+// static Windows desktop. The EMA of the inter-sync interval grows without
+// bound (the cursor blink can be the only display change, ~29 s apart), and
+// without a ceiling on 4×FrameInterval a single keystroke would wait more
+// than 100 s for a sync that is never coming. The cap should bound each
+// per-character wait to ~keySyncWaitCap regardless of how stale the EMA is.
+func TestTypeText_SyncWaitCappedOnStaticDesktop(t *testing.T) {
+	c := &mockClient{}
+	st := newSyncTracker()
+
+	// Simulate a static desktop: warm-up has already completed (so the
+	// warm-up branch is skipped), and the EMA has been dragged to 30 s per
+	// frame by long quiet periods. With the bug, maxWait = 4 × 30 s = 120 s
+	// per character; with the fix, maxWait is bounded by keySyncWaitCap
+	// (1.5 s by default). No sync() is ever signalled — the tracker is
+	// deliberately silent to emulate a display that never changes.
+	st.gen.Store(1)
+	st.frameNanos.Store(int64(30 * time.Second))
+
+	start := time.Now()
+	if err := typeText(c, "x", 0, st); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// With the cap at 1.5 s there's exactly one per-character barrier wait
+	// and no warm-up wait (FrameInterval() is already non-zero), so the
+	// upper bound is keySyncWaitCap plus a small slack for scheduling on
+	// slow CI hardware. 2 s is comfortably above 1.5 s without letting the
+	// original bug (≥50 s) slip through.
+	if elapsed > 2*time.Second {
+		t.Errorf("expected typeText to complete within 2s under a stale FrameInterval, got %v (cap=%v)", elapsed, keySyncWaitCap)
+	}
+	// The wait must still actually happen — otherwise the barrier is broken
+	// and we've lost the drain guarantee. With a never-signalling tracker
+	// the wait should hit its full budget; assert at least a few hundred ms
+	// to catch accidental no-op regressions.
+	if elapsed < 100*time.Millisecond {
+		t.Errorf("expected typeText to block on the sync barrier for at least 100ms, got %v", elapsed)
+	}
+}
+
+// --- loadKeySyncWaitCap -------------------------------------------------
+
+// TestLoadKeySyncWaitCap covers the DEXBOX_KEY_SYNC_WAIT_MS env var parsing:
+// default when unset, clamp when below floor, honor valid values, and fall
+// back on garbage. Mirrors the shape of TestLoadIdleDisconnectDelay.
+func TestLoadKeySyncWaitCap(t *testing.T) {
+	cases := []struct {
+		name  string
+		set   bool
+		value string
+		want  time.Duration
+	}{
+		{"unset uses default", false, "", defaultKeySyncWaitCap},
+		{"valid value honoured", true, "3000", 3 * time.Second},
+		{"below floor is clamped", true, "10", minKeySyncWaitCap},
+		{"zero falls back to default", true, "0", defaultKeySyncWaitCap},
+		{"negative falls back to default", true, "-10", defaultKeySyncWaitCap},
+		{"garbage falls back to default", true, "notanumber", defaultKeySyncWaitCap},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("DEXBOX_KEY_SYNC_WAIT_MS", tc.value)
+			} else {
+				t.Setenv("DEXBOX_KEY_SYNC_WAIT_MS", "")
+				_ = os.Unsetenv("DEXBOX_KEY_SYNC_WAIT_MS")
+			}
+			got := loadKeySyncWaitCap()
+			if got != tc.want {
+				t.Errorf("loadKeySyncWaitCap() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
