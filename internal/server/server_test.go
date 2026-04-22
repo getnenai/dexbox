@@ -426,6 +426,79 @@ func TestHandleDesktops_CreateRDP(t *testing.T) {
 	}
 }
 
+// TestHandleDesktops_CreateVM_MissingName verifies that POST /desktops with
+// type=vm and no name returns 400.
+func TestHandleDesktops_CreateVM_MissingName(t *testing.T) {
+	srv := newTestServer(t)
+
+	body := `{"type": "vm", "iso_path": "/tmp/win.iso"}`
+	req := httptest.NewRequest("POST", "/desktops", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.handleCreateDesktop(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleDesktops_CreateVM_MissingISO verifies that POST /desktops with
+// type=vm and no iso_path returns 400.
+func TestHandleDesktops_CreateVM_MissingISO(t *testing.T) {
+	srv := newTestServer(t)
+
+	body := `{"type": "vm", "name": "test-vm"}`
+	req := httptest.NewRequest("POST", "/desktops", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.handleCreateDesktop(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// TestHandleDesktops_CreateVM_InvalidResources verifies that out-of-bounds
+// resource values are rejected before VBoxManage is invoked.
+func TestHandleDesktops_CreateVM_InvalidResources(t *testing.T) {
+	srv := newTestServer(t)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"negative cpus", `{"type":"vm","name":"vm1","iso_path":"/tmp/win.iso","cpus":-1}`},
+		{"too little memory", `{"type":"vm","name":"vm1","iso_path":"/tmp/win.iso","memory_gb":1}`},
+		{"too small disk", `{"type":"vm","name":"vm1","iso_path":"/tmp/win.iso","disk_gb":10}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/desktops", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			srv.handleCreateDesktop(w, req)
+
+			resp := w.Result()
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusBadRequest {
+				respBody, _ := io.ReadAll(resp.Body)
+				t.Fatalf("expected 400 for %q, got %d: %s", tc.name, resp.StatusCode, respBody)
+			}
+		})
+	}
+}
+
 // TestHandleDesktops_CreateRDP_MissingHost verifies that creating an RDP
 // connection without a host returns a 400 error.
 func TestHandleDesktops_CreateRDP_MissingHost(t *testing.T) {

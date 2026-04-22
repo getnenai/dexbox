@@ -565,6 +565,11 @@ func (s *Server) handleCreateDesktop(w http.ResponseWriter, r *http.Request) {
 		Height       int    `json:"height,omitempty"`
 		DriveEnabled bool   `json:"drive_enabled,omitempty"`
 		DriveName    string `json:"drive_name,omitempty"`
+		// VM creation fields (type=vm only)
+		ISOPath  string `json:"iso_path,omitempty"`
+		CPUs     int    `json:"cpus,omitempty"`
+		MemoryGB int    `json:"memory_gb,omitempty"`
+		DiskGB   int    `json:"disk_gb,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
@@ -586,10 +591,12 @@ func (s *Server) handleCreateDesktop(w http.ResponseWriter, r *http.Request) {
 			DriveEnabled: req.DriveEnabled,
 			DriveName:    req.DriveName,
 		})
+	case "vm":
+		s.createVM(w, ctx, req.Name, req.ISOPath, req.Username, req.Password, req.CPUs, req.MemoryGB, req.DiskGB)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error":   "bad_request",
-			"message": fmt.Sprintf("unknown desktop type %q (use: rdp)", req.Type),
+			"message": fmt.Sprintf("unknown desktop type %q (use: rdp, vm)", req.Type),
 		})
 	}
 }
@@ -654,6 +661,77 @@ func (s *Server) createRDP(w http.ResponseWriter, ctx context.Context, name stri
 		"name": name,
 		"type": "rdp",
 		"host": fmt.Sprintf("%s:%d", cfg.Host, port),
+	})
+}
+
+// createVM handles POST /desktops with type=vm. It blocks until the Windows
+// installation is complete (15-30 minutes). Callers should use an HTTP client
+// with a long timeout or run the request asynchronously.
+func (s *Server) createVM(w http.ResponseWriter, ctx context.Context, name, isoPath, user, pass string, cpus, memoryGB, diskGB int) {
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": "name is required for VM creation",
+		})
+		return
+	}
+	if strings.Contains(name, "/") || name == "down-all" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": `name must be a single path segment and cannot be "down-all"`,
+		})
+		return
+	}
+	if isoPath == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": "iso_path is required for VM creation",
+		})
+		return
+	}
+
+	def := vbox.DefaultVMConfig()
+	if cpus == 0 {
+		cpus = def.CPUs
+	}
+	if memoryGB == 0 {
+		memoryGB = def.MemoryMB / 1024
+	}
+	if diskGB == 0 {
+		diskGB = def.DiskGB
+	}
+
+	cfg := vbox.VMConfig{
+		CPUs:     cpus,
+		MemoryMB: memoryGB * 1024,
+		VRAMmb:   def.VRAMmb,
+		DiskGB:   diskGB,
+	}
+	if err := cfg.Validate(); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "bad_request",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	if user == "" {
+		user = "dexbox"
+	}
+	if pass == "" {
+		pass = "dexbox123"
+	}
+
+	if err := vbox.Install(ctx, name, isoPath, user, pass, cfg); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":   "tool_error",
+			"message": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"name": name,
+		"type": "vm",
 	})
 }
 

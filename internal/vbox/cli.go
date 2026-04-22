@@ -32,14 +32,29 @@ func runVBoxManageTimeout(ctx context.Context, timeout time.Duration, args ...st
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	// Collect values that follow --password flags so they can be scrubbed
+	// from any output or error text before it leaves this function.
+	var sensitiveValues []string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--password" {
+			sensitiveValues = append(sensitiveValues, args[i+1])
+		}
+	}
+	redact := func(s string) string {
+		for _, v := range sensitiveValues {
+			s = strings.ReplaceAll(s, v, "***")
+		}
+		return s
+	}
+
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", fmt.Errorf("VBoxManage %s: %s", args[0], msg)
+		return "", fmt.Errorf("VBoxManage %s: %s", args[0], redact(msg))
 	}
-	return stdout.String(), nil
+	return redact(stdout.String()), nil
 }
 
 // Screenshot captures a PNG screenshot of the VM display to a temp file,
@@ -193,8 +208,26 @@ func DefaultVMConfig() VMConfig {
 	}
 }
 
+// Validate checks that the VM configuration has sane resource bounds.
+func (c VMConfig) Validate() error {
+	if c.CPUs < 1 {
+		return fmt.Errorf("cpus must be at least 1 (got %d)", c.CPUs)
+	}
+	if c.MemoryMB < 2048 {
+		return fmt.Errorf("memory must be at least 2048 MB (got %d MB)", c.MemoryMB)
+	}
+	if c.DiskGB < 32 {
+		return fmt.Errorf("disk must be at least 32 GB (got %d GB)", c.DiskGB)
+	}
+	return nil
+}
+
 // CreateVM registers and configures a new VM. It does NOT start it.
 func CreateVM(ctx context.Context, name string, cfg VMConfig) error {
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid VM config: %w", err)
+	}
+
 	ostype := "Windows11_64"
 	if nativeArch() == "arm64" {
 		ostype = "Windows11_arm64"

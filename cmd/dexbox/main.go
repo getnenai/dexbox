@@ -650,6 +650,9 @@ func cmdCreateVM() *cobra.Command {
 		isoPath string
 		fromVM  string
 		user    string
+		cpus    int
+		memory  int
+		disk    int
 	)
 	c := &cobra.Command{
 		Use:   "vm <name>",
@@ -661,15 +664,22 @@ When --iso is provided, a full Windows installation runs (15-30 minutes).
 When --from-desktop is provided, an existing VM is cloned (seconds).
 Exactly one of --iso or --from-desktop must be specified.
 
+Resource flags (--cpus, --memory, --disk) only apply to fresh ISO installs.
+Clones inherit the source VM's specs.
+
 Examples:
   dexbox create vm desktop-1 --iso ~/Downloads/Win11_25H2_English_x64.iso
   dexbox create vm desktop-2 --from-desktop desktop-1
-  dexbox create vm desktop-1 --iso ~/Downloads/Win11.iso --user myname`,
+  dexbox create vm desktop-1 --iso ~/Downloads/Win11.iso --user myname
+  dexbox create vm desktop-big --iso ~/Downloads/Win11.iso --cpus 8 --memory 16 --disk 128`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 
 			if fromVM != "" {
+				if cmd.Flags().Changed("cpus") || cmd.Flags().Changed("memory") || cmd.Flags().Changed("disk") {
+					return fmt.Errorf("--cpus, --memory, and --disk cannot be used with --from-desktop (clones inherit source specs)")
+				}
 				return vbox.Clone(context.Background(), fromVM, name)
 			}
 
@@ -697,12 +707,21 @@ Examples:
 				}
 			}
 
-			return vbox.Install(context.Background(), name, expandedISO, user, pass)
+			cfg := vbox.VMConfig{
+				CPUs:     cpus,
+				MemoryMB: memory * 1024,
+				VRAMmb:   128,
+				DiskGB:   disk,
+			}
+			return vbox.Install(context.Background(), name, expandedISO, user, pass, cfg)
 		},
 	}
 	c.Flags().StringVar(&isoPath, "iso", "", "Path to Windows ISO (for fresh install)")
 	c.Flags().StringVar(&fromVM, "from-desktop", "", "Source VM to clone (for instant creation)")
 	c.Flags().StringVar(&user, "user", "dexbox", "Guest OS username")
+	c.Flags().IntVar(&cpus, "cpus", 4, "Number of virtual CPUs (ISO install only)")
+	c.Flags().IntVar(&memory, "memory", 8, "RAM in GB (ISO install only)")
+	c.Flags().IntVar(&disk, "disk", 64, "Disk size in GB (ISO install only)")
 	c.MarkFlagsMutuallyExclusive("iso", "from-desktop")
 	c.MarkFlagsMutuallyExclusive("from-desktop", "user")
 	return c
