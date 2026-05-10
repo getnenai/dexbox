@@ -9,7 +9,7 @@ import (
 
 // CanonicalAction is the internal representation of any tool call.
 type CanonicalAction struct {
-	Tool   string         `json:"tool"`   // "computer", "bash"
+	Tool   string         `json:"tool"`   // "computer", "bash", "text_editor"
 	Action string         `json:"action"` // "left_click", "screenshot", "view", etc.
 	Params map[string]any `json:"params"` // coordinate, text, command, path, etc.
 }

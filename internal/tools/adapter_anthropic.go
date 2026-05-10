@@ -35,7 +35,13 @@ func (a *AnthropicAdapter) ToolDefinitions(capabilities []string, display Displa
 		defs = append(defs, def)
 	}
 
-
+	if capSet["text_editor"] {
+		def, _ := json.Marshal(map[string]any{
+			"type": "text_editor_20250124",
+			"name": "text_editor",
+		})
+		defs = append(defs, def)
+	}
 
 	return defs
 }
@@ -53,7 +59,8 @@ func (a *AnthropicAdapter) ParseToolCall(raw json.RawMessage) (*CanonicalAction,
 		return a.parseComputer(call)
 	case "bash_20250124":
 		return a.parseBash(call)
-
+	case "text_editor_20250124":
+		return a.parseTextEditor(call)
 	default:
 		return nil, fmt.Errorf("unknown tool type %q", toolType)
 	}
@@ -100,7 +107,38 @@ func (a *AnthropicAdapter) parseBash(call map[string]any) (*CanonicalAction, err
 	}, nil
 }
 
+func (a *AnthropicAdapter) parseTextEditor(call map[string]any) (*CanonicalAction, error) {
+	command, _ := call["command"].(string)
+	if command == "" {
+		return nil, fmt.Errorf("field 'command' required for text_editor tool")
+	}
 
+	params := map[string]any{"command": command}
+	if path, ok := call["path"].(string); ok {
+		params["path"] = path
+	}
+	if fileText, ok := call["file_text"].(string); ok {
+		params["file_text"] = fileText
+	}
+	if oldStr, ok := call["old_str"].(string); ok {
+		params["old_str"] = oldStr
+	}
+	if newStr, ok := call["new_str"].(string); ok {
+		params["new_str"] = newStr
+	}
+	if insertLine, ok := call["insert_line"].(float64); ok {
+		params["insert_line"] = insertLine
+	}
+	if viewRange, ok := call["view_range"].([]any); ok {
+		params["view_range"] = viewRange
+	}
+
+	return &CanonicalAction{
+		Tool:   "text_editor",
+		Action: command,
+		Params: params,
+	}, nil
+}
 
 func (a *AnthropicAdapter) FormatResult(action *CanonicalAction, result *CanonicalResult) (json.RawMessage, error) {
 	resp := map[string]any{}
@@ -117,7 +155,9 @@ func (a *AnthropicAdapter) FormatResult(action *CanonicalAction, result *Canonic
 	case "bash":
 		resp["type"] = "bash_20250124"
 		resp["output"] = result.Output
-
+	case "text_editor":
+		resp["type"] = "text_editor_20250124"
+		resp["output"] = result.Output
 	}
 
 	return json.Marshal(resp)
